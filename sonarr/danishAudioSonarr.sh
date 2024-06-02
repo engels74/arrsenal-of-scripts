@@ -77,7 +77,7 @@ find_history_record_id() {
 
     history_records=$(curl -s -H "X-Api-Key: $SONARR_API_KEY" "$SONARR_API_URL/history")
 
-    history_id=$(echo "$history_records" | jq -r --arg download_id "$download_id" '.records[] | select(.downloadId == $download_id) | .id')
+    history_id=$(echo "$history_records" | jq -r --arg download_id "$download_id" '.records[] | select(.downloadId == $download_id) | .id' | head -n 1)
 
     if [[ -z "$history_id" ]]; then
         log_info "Error: No history record found for download ID: $download_id"
