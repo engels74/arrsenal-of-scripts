@@ -75,9 +75,9 @@ find_history_record_id() {
     local history_records
     local history_id
 
-    history_records=$(curl -s -H "X-Api-Key: $RADARR_API_KEY" "$RADARR_API_URL/history")
+    history_records=$(curl -s -H "X-Api-Key: $RADARR_API_KEY" "$RADARR_API_URL/history?eventType=1&downloadId=$download_id")
 
-    history_id=$(echo "$history_records" | jq -r --arg download_id "$download_id" '.records[] | select(.downloadId == $download_id) | .id')
+    history_id=$(echo "$history_records" | jq -r '.records[0].id')
 
     if [[ -z "$history_id" ]]; then
         log_info "Error: No history record found for download ID: $download_id"
