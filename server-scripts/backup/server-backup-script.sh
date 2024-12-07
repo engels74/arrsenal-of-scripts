@@ -23,7 +23,7 @@ set -euo pipefail
 #   ./server-backup-script.sh [options]
 #
 # Options:
-#   -h, --help       Show help message
+#   -h, --help        Show help message
 #   -d, --dry-run     Perform a dry run (no backup or file removals, just logging)
 #   -p, --password    Prompt for backup password if not set as an environment variable
 #
@@ -118,6 +118,18 @@ error_exit() {
     exit 1
 }
 
+verify_user_group() {
+    # Verify backup user exists
+    if ! id -u "$BACKUP_USER" >/dev/null 2>&1; then
+        error_exit "Backup user '$BACKUP_USER' does not exist"
+    fi
+
+    # Verify backup group exists
+    if ! getent group "$BACKUP_GROUP" >/dev/null 2>&1; then
+        error_exit "Backup group '$BACKUP_GROUP' does not exist"
+    fi
+}
+
 check_dependencies() {
     local deps=("7z" "sort" "awk" "xargs" "find" "mkdir" "tee" "rm" "date")
     for dep in "${deps[@]}"; do
@@ -209,14 +221,16 @@ create_backup() {
         error_exit "No backup password set. Provide one with BACKUP_PASSWORD env or --password option."
     fi
 
-    cd /
+    # Change to root directory and verify success
+    if ! cd /; then
+        error_exit "Failed to change to root directory"
+    fi
 
     while [ $retry_count -lt $max_retries ] && [ "$success" = false ]; do
         log "Backup attempt $((retry_count + 1)) of $max_retries"
         log "Creating backup archive..."
 
-        # Adjust or remove the exclude pattern (-xr!) if not needed.
-        # Example exclude: -xr!/opt/docker-all/immich/library
+        # Quote array expansion to handle paths with spaces
         if 7z a \
            -mx="$BACKUP_COMPRESSION_LEVEL" \
            -mmt=on \
@@ -224,7 +238,7 @@ create_backup() {
            -mhe=on \
            -spf2 \
            "$BACKUP_FILE" \
-           "${BACKUP_DIRS[@]}"; then
+           "${BACKUP_DIRS[@]@Q}"; then
             log "Backup completed successfully"
             success=true
         else
@@ -258,9 +272,15 @@ verify_backup() {
 }
 
 set_permissions() {
-    chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_FILE"
-    chmod 600 "$BACKUP_FILE"
-    chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_ROOT_DIR"
+    if ! chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_FILE"; then
+        error_exit "Failed to set ownership on backup file"
+    fi
+    if ! chmod 600 "$BACKUP_FILE"; then
+        error_exit "Failed to set permissions on backup file"
+    fi
+    if ! chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_ROOT_DIR"; then
+        error_exit "Failed to set ownership on backup directory"
+    fi
 }
 
 ### End Functions Section ###################################################
@@ -294,6 +314,7 @@ done
 
 check_root
 check_dependencies
+verify_user_group
 already_running_check
 
 if [ "$PROMPT_PASSWORD" = true ] && [ -z "$BACKUP_PASSWORD" ]; then
@@ -313,7 +334,11 @@ rotate_logs
 
 log "Starting backup process at $(date '+%Y-%m-%d %H:%M:%S')"
 
-mkdir -p "$BACKUP_ROOT_DIR"
+# Create backup directory with proper quoting
+if ! mkdir -p "$BACKUP_ROOT_DIR"; then
+    error_exit "Failed to create backup directory"
+fi
+
 BACKUP_FILE="$BACKUP_ROOT_DIR/backup-$(date '+%Y-%m-%d').7z"
 
 if [ "$DRY_RUN" = false ]; then
