@@ -46,6 +46,47 @@ BANDWIDTH_LIMIT="10M"                   # Bandwidth limit, e.g. "10M" or "off"
 ENABLE_PRIVATEBIN_UPLOAD="false"        # Set "true" to enable PrivateBin
 RCLONE_DRY_RUN="false"                  # Set to "true" to enable dry-run mode
 
+### Filter Configuration Section ##############################################
+# Rclone Filter Rules Documentation: https://rclone.org/filtering/
+#
+# Example structure of what can be synced:
+# /path/to/source/
+# ├── backups/
+# │   ├── daily/
+# │   └── weekly/
+# ├── library/
+# │   ├── books/
+# │   └── music/
+# ├── profile/
+# │   ├── settings.json
+# │   └── avatars/
+# ├── temp/
+# │   └── cache/
+# └── thumbs/
+#     └── albums/
+#
+# Filter Rules:
+# - Rules are processed in order
+# - '+' means include
+# - '-' means exclude
+# - '**' matches everything including slashes
+# - '*'  matches everything except slashes
+#
+# Example filters that would sync only specific folders:
+#   "+ backups/**"    -> Includes all files/folders under backups/
+#   "+ library/**"    -> Includes all files/folders under library/
+#   "- temp/**"       -> Excludes temporary files/folders
+#   "- **"           -> Excludes everything else not explicitly included
+#
+# Set your filters below (one per line, leave empty to sync everything):
+RCLONE_FILTERS=(
+    #"+ backups/**"
+    #"+ library/**"
+    #"+ profile/**"
+    #"+ thumbs/**"
+    #"- **"
+)
+
 # Discord Configuration (optional)
 DISCORD_WEBHOOK_URL=""                  # Your Discord webhook URL
 DISCORD_ICON_OVERRIDE=""                # Custom icon URL for notifications
@@ -168,6 +209,30 @@ log_message "Starting rclone sync operation"
 log_message "Source: $SOURCE"
 log_message "Destination: $DEST"
 
+# Validate and log filter settings
+if [ ${#RCLONE_FILTERS[@]} -gt 0 ]; then
+    log_message "Filter rules enabled:"
+    for filter in "${RCLONE_FILTERS[@]}"; do
+        # Remove surrounding quotes if present
+        filter_clean=$(echo "$filter" | sed 's/^"//;s/"$//')
+        log_message "  $filter_clean"
+        
+        # Extract directory path from filter rule if it's an include rule
+        if [[ $filter_clean == "+"* ]]; then
+            # Extract path, remove '/**' suffix
+            dir_path=$(echo "$filter_clean" | sed 's/^+ *//;s/\/\*\*$//')
+            if [ -n "$dir_path" ]; then
+                full_path="$SOURCE/$dir_path"
+                if [ ! -d "$full_path" ]; then
+                    log_message "Warning: Directory does not exist: $full_path"
+                fi
+            fi
+        fi
+    done
+else
+    log_message "No filters configured - syncing all files"
+fi
+
 # Send starting notification to Discord
 send_notification "Started" "Beginning sync operation..." "16776960"
 
@@ -176,15 +241,30 @@ start_time=$(date +%s)
 ### Rclone Execution Section ##################################################
 temp_output=$(mktemp)
 
+# Build rclone command with filters if configured
 RCLONE_CMD="rclone sync"
 if [ "$RCLONE_DRY_RUN" = "true" ]; then
     RCLONE_CMD="$RCLONE_CMD --dry-run"
 fi
 
-$RCLONE_CMD "$SOURCE" "$DEST" \
+# Add filter arguments if configured
+if [ ${#RCLONE_FILTERS[@]} -gt 0 ]; then
+    # Create a temporary filter file
+    FILTER_FILE=$(mktemp)
+    for filter in "${RCLONE_FILTERS[@]}"; do
+        # Remove surrounding quotes and write to file
+        echo "$filter" | sed 's/^"//;s/"$//' >> "$FILTER_FILE"
+    done
+    FILTER_ARGS="--filter-from \"$FILTER_FILE\""
+else
+    FILTER_ARGS=""
+fi
+
+eval "$RCLONE_CMD \"$SOURCE\" \"$DEST\" \
     --create-empty-src-dirs \
     --verbose \
-    --bwlimit "$BANDWIDTH_LIMIT" \
+    --bwlimit \"$BANDWIDTH_LIMIT\" \
+    $FILTER_ARGS \
     --retries 3 \
     --retries-sleep 10s \
     --timeout 30s \
@@ -192,9 +272,14 @@ $RCLONE_CMD "$SOURCE" "$DEST" \
     --stats 1m \
     --stats-file-name-length 0 \
     --transfers=8 \
-    2>&1 | tee "$temp_output"
+    2>&1" | tee "$temp_output"
 
 EXIT_STATUS=${PIPESTATUS[0]}
+
+# Clean up the filter file if it was created
+if [ ${#RCLONE_FILTERS[@]} -gt 0 ]; then
+    rm -f "$FILTER_FILE"
+fi
 
 ### Post-Execution & Status Processing Section ###############################
 end_time=$(date +%s)
