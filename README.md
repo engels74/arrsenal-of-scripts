@@ -29,7 +29,8 @@ These scripts were written for personal use and might not suit every setup. Use 
 
 ## ⚖️ License
 
-This project is licensed under the **AGPLv3**.  
+This project is licensed under the **AGPL-3.0**.  
+
 That means you're free to use, modify, and share the code, but any derivative work must also be open-sourced under the same license.
 
 For details, check the full license text in the [LICENSE](./LICENSE) file.
