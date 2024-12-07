@@ -36,15 +36,15 @@
 #   0 2 * * * /path/to/rclone_sync_script.sh
 # #############################################################################
 
-
 ### Configuration Section #####################################################
 # Adjust the following variables to match your environment and preferences.
 LOG_DIR="/path/to/log/directory"        # Directory for logs
 MAX_LOGS=7                              # Maximum number of log files to keep
 SOURCE="/path/to/local/source"          # Local source directory
-DEST="crypt_remote:path/to/destination" # rclone crypt remote destination
+DEST="remote:path/to/destination"       # rclone remote destination
 BANDWIDTH_LIMIT="10M"                   # Bandwidth limit, e.g. "10M" or "off"
 ENABLE_PRIVATEBIN_UPLOAD="false"        # Set "true" to enable PrivateBin
+RCLONE_DRY_RUN="false"                  # Set to "true" to enable dry-run mode
 
 # Discord Configuration (optional)
 DISCORD_WEBHOOK_URL=""                  # Your Discord webhook URL
@@ -176,7 +176,12 @@ start_time=$(date +%s)
 ### Rclone Execution Section ##################################################
 temp_output=$(mktemp)
 
-rclone sync "$SOURCE" "$DEST" \
+RCLONE_CMD="rclone sync"
+if [ "$RCLONE_DRY_RUN" = "true" ]; then
+    RCLONE_CMD="$RCLONE_CMD --dry-run"
+fi
+
+$RCLONE_CMD "$SOURCE" "$DEST" \
     --create-empty-src-dirs \
     --verbose \
     --bwlimit "$BANDWIDTH_LIMIT" \
