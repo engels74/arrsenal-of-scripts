@@ -40,6 +40,7 @@
 # Adjust the following variables to match your environment and preferences.
 LOG_DIR="/path/to/log/directory"        # Directory for logs
 MAX_LOGS=7                              # Maximum number of log files to keep
+LOG_FILE_SUFFIX="rcloneSync.log"        # Suffix for log files (default: rcloneSync.log)
 SOURCE="/path/to/local/source"          # Local source directory
 DEST="remote:path/to/destination"       # rclone remote destination
 BANDWIDTH_LIMIT="10M"                   # Bandwidth limit, e.g. "10M" or "off"
@@ -196,7 +197,7 @@ mkdir -p "$LOG_DIR"
 
 # Generate timestamp for log file
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
-LOG_FILE="${LOG_DIR}/${TIMESTAMP}-rcloneSync.log"
+LOG_FILE="${LOG_DIR}/${TIMESTAMP}-${LOG_FILE_SUFFIX}"
 
 # Log rotation - remove oldest logs if count exceeds MAX_LOGS
 while [ $(ls -1 "$LOG_DIR"/*.log 2>/dev/null | wc -l) -ge $MAX_LOGS ]; do
