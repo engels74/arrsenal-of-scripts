@@ -1,48 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-###########################################################################
+# ────────────────────────────────────────────────────────────────────────────────
 # server-backup-script.sh
 #
-# Description:
-#   This script automates the backup of configuration files and directories,
-#   optionally stopping Docker services before backup and starting them again
-#   afterward. It creates compressed, encrypted archives with 7z, manages
-#   retention of old backups and logs, and supports verification after backup.
-#
-# Installation:
-#   1) Place this script in a secure location, e.g. /usr/local/bin/server-backup-script.sh
-#   2) Make the script executable: chmod +x /usr/local/bin/server-backup-script.sh
-#   3) Adjust the configuration variables below to match your environment.
-#      - Set BACKUP_USER and BACKUP_GROUP to your desired backup account.
-#      - Update BACKUP_DIRS to the directories you want to back up.
-#      - Update DOCKER_COMPOSE_FILES_STOP and DOCKER_COMPOSE_FILES_START with your stack files.
-#   4) Ensure all dependencies are installed (7z, Docker if using Docker functionality).
+# A minimalist, automated backup script that uses 7-Zip encryption and compression.
+# Optional Docker Compose stop/start management, with logs and backup retention.
 #
 # Usage:
 #   ./server-backup-script.sh [options]
-#
-# Options:
-#   -h, --help        Show help message
-#   -d, --dry-run     Perform a dry run (no backup or file removals, just logging)
-#   -p, --password    Prompt for backup password if not set as an environment variable
+#     -h, --help        Show help message
+#     -d, --dry-run     Perform a dry run (logging only; no backup/removals)
+#     -p, --password    Prompt for 7z encryption password at runtime
 #
 # Cron Example:
-#   Run every day at 2 AM as root:
-#   sudo crontab -e
 #   0 2 * * * /usr/local/bin/server-backup-script.sh
-#
-###########################################################################
+# ────────────────────────────────────────────────────────────────────────────────
 
-### Configuration Section ##################################################
 
-# Set the user and group that will own backup files.
-# Replace 'backupuser' and 'backupgroup' with the appropriate user and group.
+# ────────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ────────────────────────────────────────────────────────────────────────────────
+
+# ── Backup Ownership ───────────────────────────────────────────────────────────
 BACKUP_USER="backupuser"
 BACKUP_GROUP="backupgroup"
 
-# Directories to back up.
-# Adjust these paths to match what you want to back up.
+# ── Paths ──────────────────────────────────────────────────────────────────────
+BACKUP_ROOT_DIR="/data/backups"
+LOG_ROOT_DIR="/var/log/server-backup-script"
+
+# ── Retention ──────────────────────────────────────────────────────────────────
+RETENTION_COUNT_BACKUPS=5
+RETENTION_COUNT_LOGS=7
+
+# ── Encryption & Compression ───────────────────────────────────────────────────
+BACKUP_PASSWORD=""          # Provide via --password if empty
+BACKUP_COMPRESSION_LEVEL=3  # 0=none, 9=max
+
+# ── Docker Management Delays ───────────────────────────────────────────────────
+DOCKER_STOP_TIMEOUT=2
+DOCKER_START_DELAY=30
+
+# ── Docker Management Settings ────────────────────────────────────────────────
+DOCKER_ENABLE_STOP_BEFORE_BACKUP=true
+DOCKER_ENABLE_START_AFTER_BACKUP=true
+DOCKER_SHUTDOWN_METHOD="stop"  # "stop" or "down"
+
+# ── Log Filename ───────────────────────────────────────────────────────────────
+# The base name for log files. This script will prefix it with the date & time.
+LOG_FILENAME="backupScript"
+
+# ── Backup Sources & Docker Compose Files ─────────────────────────────────────
 BACKUP_DIRS=(
     "/path/to/system/config/logrotate"
     "/path/to/user/config"
@@ -52,9 +61,6 @@ BACKUP_DIRS=(
     "/path/to/data/scripts"
 )
 
-# Docker compose files to stop before backup.
-# These should be the paths to your Docker Compose stack files if you run services via Docker.
-# If you don't use Docker, leave empty or remove.
 DOCKER_COMPOSE_FILES_STOP=(
     "/path/to/stacks/proxy/compose.yaml"
     "/path/to/stacks/tools/compose.yaml"
@@ -64,7 +70,6 @@ DOCKER_COMPOSE_FILES_STOP=(
     "/path/to/stacks/mediaserver/compose.yaml"
 )
 
-# Docker compose files to start after backup, in the desired order.
 DOCKER_COMPOSE_FILES_START=(
     "/path/to/stacks/mediaserver/compose.yaml"
     "/path/to/stacks/proxy/compose.yaml"
@@ -74,38 +79,19 @@ DOCKER_COMPOSE_FILES_START=(
     "/path/to/stacks/utilities/compose.yaml"
 )
 
-# Root directories for backups and logs
-BACKUP_ROOT_DIR="/data/backups"
-LOG_ROOT_DIR="/var/log/server-backup-script"
 
-# Number of old backups and logs to keep
-RETENTION_COUNT_BACKUPS=5
-RETENTION_COUNT_LOGS=7
-
-# 7z encryption password
-# If empty, you can supply at runtime with --password option.
-BACKUP_PASSWORD=""
-
-# Compression level for 7z (0=none, 9=max)
-BACKUP_COMPRESSION_LEVEL=3
-
-# Docker stop/start delays
-DOCKER_STOP_TIMEOUT=2
-DOCKER_START_DELAY=30
-
-### End Configuration Section ###############################################
-
-
-### Functions Section #######################################################
+# ────────────────────────────────────────────────────────────────────────────────
+# Functions
+# ────────────────────────────────────────────────────────────────────────────────
 
 print_usage() {
     cat <<EOF
 Usage: $(basename "$0") [options]
 
 Options:
-  -h, --help       Show this help message
-  -d, --dry-run     Perform a dry run (no backup, no removals, just logging)
-  -p, --password    Prompt for 7z encryption password if not already set in environment
+  -h, --help       Show help message
+  -d, --dry-run    Perform a dry run (logging only; no backups or removals)
+  -p, --password   Prompt for 7z encryption password at runtime
 EOF
 }
 
@@ -119,15 +105,8 @@ error_exit() {
 }
 
 verify_user_group() {
-    # Verify backup user exists
-    if ! id -u "$BACKUP_USER" >/dev/null 2>&1; then
-        error_exit "Backup user '$BACKUP_USER' does not exist"
-    fi
-
-    # Verify backup group exists
-    if ! getent group "$BACKUP_GROUP" >/dev/null 2>&1; then
-        error_exit "Backup group '$BACKUP_GROUP' does not exist"
-    fi
+    id -u "$BACKUP_USER" >/dev/null 2>&1 || error_exit "User '$BACKUP_USER' not found"
+    getent group "$BACKUP_GROUP" >/dev/null 2>&1 || error_exit "Group '$BACKUP_GROUP' not found"
 }
 
 check_dependencies() {
@@ -136,21 +115,18 @@ check_dependencies() {
         command -v "$dep" &>/dev/null || error_exit "Missing dependency: $dep"
     done
 
-    # Check Docker only if we have Docker compose files defined
-    if [ ${#DOCKER_COMPOSE_FILES_STOP[@]} -gt 0 ] || [ ${#DOCKER_COMPOSE_FILES_START[@]} -gt 0 ]; then
-        command -v docker &>/dev/null || error_exit "Docker not found. Either install Docker or remove Docker-related config."
+    if [ "$DOCKER_ENABLE_STOP_BEFORE_BACKUP" = true ] || [ "$DOCKER_ENABLE_START_AFTER_BACKUP" = true ]; then
+        command -v docker &>/dev/null || error_exit "Docker not found (disable Docker steps or install Docker)."
     fi
 }
 
 check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        error_exit "Please run as root."
-    fi
+    [ "$EUID" -eq 0 ] || error_exit "Please run as root."
 }
 
 already_running_check() {
     if pidof -x "$(basename "$0")" -o %PPID &>/dev/null; then
-        error_exit "Script is already running. Exiting."
+        error_exit "Script is already running."
     fi
 }
 
@@ -169,124 +145,89 @@ rotate_backups() {
 }
 
 stop_docker_services() {
-    if ! command -v docker &>/dev/null; then
-        log "Docker not found, skipping Docker stop step."
-        return
-    fi
-
     log "Stopping Docker services..."
     for file in "${DOCKER_COMPOSE_FILES_STOP[@]}"; do
         if [ -f "$file" ]; then
-            log "Stopping services from $file"
-            docker compose -f "$file" stop || log "Warning: Failed to stop services from $file"
-            sleep $DOCKER_STOP_TIMEOUT
+            log "Shutting down using '$DOCKER_SHUTDOWN_METHOD': $file"
+            if   [ "$DOCKER_SHUTDOWN_METHOD" = "stop" ]; then
+                docker compose -f "$file" stop || log "Warning: stop failed on $file"
+            elif [ "$DOCKER_SHUTDOWN_METHOD" = "down" ]; then
+                docker compose -f "$file" down || log "Warning: down failed on $file"
+            else
+                log "Unknown DOCKER_SHUTDOWN_METHOD: $DOCKER_SHUTDOWN_METHOD"
+            fi
+            sleep "$DOCKER_STOP_TIMEOUT"
         else
-            log "Warning: $file not found, skipping."
+            log "Warning: $file not found; skipping."
         fi
     done
 
-    log "Ensuring all containers are stopped"
-    if [ -n "$(docker ps -q)" ]; then
-        docker stop $(docker ps -q)
-    else
-        log "No running containers found"
+    if [ "$DOCKER_SHUTDOWN_METHOD" = "stop" ]; then
+        log "Ensuring all containers are stopped..."
+        [ -n "$(docker ps -q)" ] && docker stop $(docker ps -q) || log "No running containers."
     fi
 }
 
 start_docker_services() {
-    if ! command -v docker &>/dev/null; then
-        log "Docker not found, skipping Docker start step."
-        return
-    fi
-
     log "Starting Docker services..."
     for file in "${DOCKER_COMPOSE_FILES_START[@]}"; do
         if [ -f "$file" ]; then
             log "Starting services from $file"
             docker compose -f "$file" up -d
-            log "Waiting $DOCKER_START_DELAY seconds before starting next stack..."
-            sleep $DOCKER_START_DELAY
+            sleep "$DOCKER_START_DELAY"
         else
-            log "Warning: $file not found, skipping."
+            log "Warning: $file not found; skipping."
         fi
     done
 }
 
 create_backup() {
+    [ -z "$BACKUP_PASSWORD" ] && error_exit "No backup password set."
+    cd / || error_exit "Failed to change to root directory"
+
     local max_retries=3
     local retry_count=0
     local success=false
 
-    if [ -z "$BACKUP_PASSWORD" ]; then
-        error_exit "No backup password set. Provide one with BACKUP_PASSWORD env or --password option."
-    fi
-
-    # Change to root directory and verify success
-    if ! cd /; then
-        error_exit "Failed to change to root directory"
-    fi
-
     while [ $retry_count -lt $max_retries ] && [ "$success" = false ]; do
-        log "Backup attempt $((retry_count + 1)) of $max_retries"
-        log "Creating backup archive..."
-
-        # Quote array expansion to handle paths with spaces
-        if 7z a \
-           -mx="$BACKUP_COMPRESSION_LEVEL" \
-           -mmt=on \
-           -p"$BACKUP_PASSWORD" \
-           -mhe=on \
-           -spf2 \
-           "$BACKUP_FILE" \
-           "${BACKUP_DIRS[@]@Q}"; then
-            log "Backup completed successfully"
+        log "Backup attempt $((retry_count + 1))/$max_retries"
+        if 7z a -bb2 -mx="$BACKUP_COMPRESSION_LEVEL" -mmt=on -p"$BACKUP_PASSWORD" \
+               -mhe=on -snl -spf2 "$BACKUP_FILE" "${BACKUP_DIRS[@]}"; then
+            log "Backup completed successfully."
             success=true
         else
             local ret=$?
-            log "7z returned error code: $ret"
+            log "7z returned code: $ret"
             if [ $ret -eq 1 ]; then
-                log "Backup completed with warnings. Check logs for details."
+                log "Backup completed with warnings."
                 success=true
             else
                 retry_count=$((retry_count + 1))
-                if [ $retry_count -lt $max_retries ]; then
-                    log "Critical failure, retrying in 30 seconds..."
-                    sleep 30
-                else
-                    log "Backup failed after $max_retries attempts"
-                    return 1
-                fi
+                [ $retry_count -lt $max_retries ] && log "Retrying in 30s..." && sleep 30
             fi
         fi
     done
+
+    [ "$success" = true ] || return 1
     return 0
 }
 
 verify_backup() {
-    log "Verifying backup file integrity..."
-    if ! 7z t "$BACKUP_FILE" -p"$BACKUP_PASSWORD"; then
-        log "Backup verification failed"
-        return 1
-    fi
+    log "Verifying backup integrity..."
+    7z t "$BACKUP_FILE" -p"$BACKUP_PASSWORD" || return 1
     return 0
 }
 
 set_permissions() {
-    if ! chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_FILE"; then
-        error_exit "Failed to set ownership on backup file"
-    fi
-    if ! chmod 600 "$BACKUP_FILE"; then
-        error_exit "Failed to set permissions on backup file"
-    fi
-    if ! chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_ROOT_DIR"; then
-        error_exit "Failed to set ownership on backup directory"
-    fi
+    chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_FILE" || error_exit "Chown failed on backup file"
+    chmod 600 "$BACKUP_FILE" || error_exit "Chmod failed on backup file"
+    chown "${BACKUP_USER}:${BACKUP_GROUP}" "$BACKUP_ROOT_DIR" || error_exit "Chown failed on backup directory"
 }
 
-### End Functions Section ###################################################
 
-
-### Main Section ############################################################
+# ────────────────────────────────────────────────────────────────────────────────
+# Main
+# ────────────────────────────────────────────────────────────────────────────────
 
 DRY_RUN=false
 PROMPT_PASSWORD=false
@@ -299,17 +240,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         -d|--dry-run)
             DRY_RUN=true
-            shift
             ;;
         -p|--password)
             PROMPT_PASSWORD=true
-            shift
             ;;
         *)
             print_usage
             exit 1
             ;;
     esac
+    shift
 done
 
 check_root
@@ -323,78 +263,66 @@ if [ "$PROMPT_PASSWORD" = true ] && [ -z "$BACKUP_PASSWORD" ]; then
 fi
 
 mkdir -p "$LOG_ROOT_DIR"
-LOG_FILE="$LOG_ROOT_DIR/$(date '+%Y-%m-%d_%H-%M-%S')-backupScript.log"
+
+# Build the full log file name using LOG_FILENAME plus date/time prefix.
+LOG_FILE="$LOG_ROOT_DIR/$(date '+%Y-%m-%d_%H-%M-%S')-${LOG_FILENAME}.log"
+
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-if [ "$DRY_RUN" = true ]; then
-    log "Dry run enabled. No backups or removals will be performed."
-fi
+$DRY_RUN && log "DRY RUN: No backup or removal actions will be performed."
 
 rotate_logs
 
-log "Starting backup process at $(date '+%Y-%m-%d %H:%M:%S')"
+log "Starting backup @ $(date '+%Y-%m-%d %H:%M:%S')"
+mkdir -p "$BACKUP_ROOT_DIR" || error_exit "Failed to create $BACKUP_ROOT_DIR"
+BACKUP_FILE="$BACKUP_ROOT_DIR/$(date '+%Y-%m-%d_%H-%M-%S')-backup.7z"
 
-# Create backup directory with proper quoting
-if ! mkdir -p "$BACKUP_ROOT_DIR"; then
-    error_exit "Failed to create backup directory"
-fi
-
-BACKUP_FILE="$BACKUP_ROOT_DIR/backup-$(date '+%Y-%m-%d').7z"
-
-if [ "$DRY_RUN" = false ]; then
-    log "Cleaning up old backup files..."
+if ! $DRY_RUN; then
+    log "Cleaning old backups..."
     rotate_backups
-else
-    log "[DRY-RUN] Would rotate old backups here."
 fi
 
-log "Stopping services..."
-if [ "$DRY_RUN" = false ]; then
+log "Stopping services (if enabled)..."
+if ! $DRY_RUN && [ "$DOCKER_ENABLE_STOP_BEFORE_BACKUP" = true ]; then
     stop_docker_services
-else
-    log "[DRY-RUN] Would stop docker services here."
 fi
 
 log "Creating backup..."
-if [ "$DRY_RUN" = false ]; then
+if ! $DRY_RUN; then
     if ! create_backup; then
-        log "Backup process failed"
-        log "Starting services again..."
-        start_docker_services
+        log "Backup failed."
+        if [ "$DOCKER_ENABLE_START_AFTER_BACKUP" = true ]; then
+            log "Attempting to start services..."
+            start_docker_services
+        fi
         exit 1
     fi
-else
-    log "[DRY-RUN] Would create backup here."
 fi
 
-if [ "$DRY_RUN" = false ]; then
+if ! $DRY_RUN; then
     if ! verify_backup; then
-        log "Backup verification failed"
-        log "Starting services again..."
-        start_docker_services
+        log "Backup verification failed."
+        [ "$DOCKER_ENABLE_START_AFTER_BACKUP" = true ] && start_docker_services
         exit 1
     fi
 
-    log "Setting appropriate permissions..."
+    log "Setting permissions..."
     set_permissions
-else
-    log "[DRY-RUN] Would verify and set permissions here."
 fi
 
-log "Starting services..."
-if [ "$DRY_RUN" = false ]; then
+log "Starting services (if enabled)..."
+if ! $DRY_RUN && [ "$DOCKER_ENABLE_START_AFTER_BACKUP" = true ]; then
     start_docker_services
-else
-    log "[DRY-RUN] Would start docker services here."
 fi
 
-log "Backup process completed at $(date '+%Y-%m-%d %H:%M:%S')"
+log "Backup completed @ $(date '+%Y-%m-%d %H:%M:%S')."
 log "Backup file: $BACKUP_FILE"
-
 exit 0
 
-### End Main Section ########################################################
 
+# ────────────────────────────────────────────────────────────────────────────────
+# License
+# ────────────────────────────────────────────────────────────────────────────────
 # Server Backup Script
 # <https://github.com/engels74/arrsenal-of-scripts>
 # This script backups up files and directories using 7-zip
