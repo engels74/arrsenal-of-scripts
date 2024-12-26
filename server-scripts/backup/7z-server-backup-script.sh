@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # server-backup-script.sh
 #
 # A minimalist, automated backup script that uses 7-Zip encryption and compression.
@@ -15,43 +15,42 @@ set -euo pipefail
 #
 # Cron Example:
 #   0 2 * * * /usr/local/bin/server-backup-script.sh
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Configuration
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-# ── Backup Ownership ───────────────────────────────────────────────────────────
+# --- Backup Ownership --------------------------------------------------------
 BACKUP_USER="backupuser"
 BACKUP_GROUP="backupgroup"
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
+# --- Paths -------------------------------------------------------------------
 BACKUP_ROOT_DIR="/data/backups"
 LOG_ROOT_DIR="/var/log/server-backup-script"
 
-# ── Retention ──────────────────────────────────────────────────────────────────
+# --- Retention ---------------------------------------------------------------
 RETENTION_COUNT_BACKUPS=5
 RETENTION_COUNT_LOGS=7
 
-# ── Encryption & Compression ───────────────────────────────────────────────────
+# --- Encryption & Compression -----------------------------------------------
 BACKUP_PASSWORD=""          # Provide via --password if empty
 BACKUP_COMPRESSION_LEVEL=3  # 0=none, 9=max
 
-# ── Docker Management Delays ───────────────────────────────────────────────────
+# --- Docker Management Delays -----------------------------------------------
 DOCKER_STOP_TIMEOUT=2
 DOCKER_START_DELAY=30
 
-# ── Docker Management Settings ────────────────────────────────────────────────
+# --- Docker Management Settings ---------------------------------------------
 DOCKER_ENABLE_STOP_BEFORE_BACKUP=true
 DOCKER_ENABLE_START_AFTER_BACKUP=true
 DOCKER_SHUTDOWN_METHOD="stop"  # "stop" or "down"
 
-# ── Log Filename ───────────────────────────────────────────────────────────────
+# --- Log Filename -----------------------------------------------------------
 # The base name for log files. This script will prefix it with the date & time.
 LOG_FILENAME="backupScript"
 
-# ── Backup Sources & Docker Compose Files ─────────────────────────────────────
+# --- Backup Sources & Docker Compose Files ---------------------------------
 BACKUP_DIRS=(
     "/path/to/system/config/logrotate"
     "/path/to/user/config"
@@ -80,9 +79,9 @@ DOCKER_COMPOSE_FILES_START=(
 )
 
 
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Functions
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 print_usage() {
     cat <<EOF
@@ -214,8 +213,13 @@ create_backup() {
 
 verify_backup() {
     log "Verifying backup integrity..."
-    7z t "$BACKUP_FILE" -p"$BACKUP_PASSWORD" || return 1
-    return 0
+    if 7z t "$BACKUP_FILE" -p"$BACKUP_PASSWORD"; then
+        log "✓ Backup verification successful - archive integrity confirmed"
+        return 0
+    else
+        log "✗ Backup verification failed - archive may be corrupted"
+        return 1
+    fi
 }
 
 set_permissions() {
@@ -225,9 +229,9 @@ set_permissions() {
 }
 
 
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Main
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 DRY_RUN=false
 PROMPT_PASSWORD=false
@@ -244,7 +248,7 @@ while [[ $# -gt 0 ]]; do
         -p|--password)
             PROMPT_PASSWORD=true
             ;;
-        *)
+        * )
             print_usage
             exit 1
             ;;
@@ -320,9 +324,10 @@ log "Backup file: $BACKUP_FILE"
 exit 0
 
 
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # License
-# ────────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+
 # Server Backup Script
 # <https://github.com/engels74/arrsenal-of-scripts>
 # This script backups up files and directories using 7-zip
