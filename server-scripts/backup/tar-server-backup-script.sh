@@ -214,7 +214,7 @@ create_backup() {
         # The final output is a single encrypted file with ".tar.gz.enc"
         if tar -cf - "${BACKUP_DIRS[@]}" \
             | gzip -"$BACKUP_COMPRESSION_LEVEL" \
-            | openssl enc -aes-256-cbc -md sha256 -pass pass:"$BACKUP_PASSWORD" \
+            | openssl enc -aes-256-cbc -md sha256 -pass pass:"$BACKUP_PASSWORD" -pbkdf2 \
                 -out "$BACKUP_FILE"
         then
             log "Backup completed successfully."
@@ -241,7 +241,7 @@ verify_backup() {
     log "Verifying backup integrity..."
 
     # Decrypt the file, decompress, and test the tar archive
-    if openssl enc -aes-256-cbc -md sha256 -d -pass pass:"$BACKUP_PASSWORD" -in "$BACKUP_FILE" \
+    if openssl enc -aes-256-cbc -md sha256 -d -pass pass:"$BACKUP_PASSWORD" -pbkdf2 -in "$BACKUP_FILE" \
         | gzip -d \
         | tar -tf - >/dev/null
     then
