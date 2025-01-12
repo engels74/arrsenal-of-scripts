@@ -29,8 +29,6 @@ These scripts were written for personal use and might not suit every setup. Use 
 
 ## ⚖️ License
 
-This project is licensed under the **AGPL-3.0**.  
+[![GNU AGPLv3 Image](https://www.gnu.org/graphics/agplv3-155x51.png)](https://www.gnu.org/licenses/agpl-3.0.en.html)
 
-That means you're free to use, modify, and share the code, but any derivative work must also be open-sourced under the same license.
-
-For details, check the full license text in the [LICENSE](./LICENSE) file.
+This project is licensed under the AGPLv3 License - see the LICENSE file for details.
