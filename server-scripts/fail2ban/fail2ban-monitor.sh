@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # fail2ban-monitor.sh - Real-time Fail2ban IP Monitor
 # 

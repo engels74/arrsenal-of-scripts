@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Script: radarr_touch_file_mtime.sh
 # Purpose: Updates the modification timestamp of movie files to the current time. This is useful when

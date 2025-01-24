@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Path to ffprobe
 FFPROBE="/app/bin/ffprobe"

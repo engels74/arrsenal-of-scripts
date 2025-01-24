@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Script: Update Compose File URLs
 # Purpose: This script updates URLs in YAML files (e.g., `compose.yml`, `docker-compose.yaml`, etc.)

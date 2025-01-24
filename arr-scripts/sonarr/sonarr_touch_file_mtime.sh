@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Script: sonarr_touch_file_mtime.sh
 # Purpose: Updates the modification timestamp of episode files to the current time. This is useful when
