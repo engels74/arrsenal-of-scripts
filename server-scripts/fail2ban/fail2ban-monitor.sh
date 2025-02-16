@@ -27,6 +27,7 @@ trap cleanup SIGINT SIGTERM EXIT
 
 # Function: Display error message and exit
 error_exit() {
+    trap - EXIT SIGINT SIGTERM   # disable traps so cleanup doesn't run
     echo -e "${RED}Error: $1${NC}" >&2
     exit 1
 }
