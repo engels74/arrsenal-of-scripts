@@ -364,10 +364,14 @@ log_message "Operation completed"
 
 exit $EXIT_STATUS
 
+# -----------------------------------------------------------------------------
+# License
+# -----------------------------------------------------------------------------
+
 # Rclone Sync Script
 # <https://github.com/engels74/arrsenal-of-scripts>
 # This script syncs files via rclone to crypt remote
-# Copyright (C) 2024 - engels74
+# Copyright (C) 2025 - engels74
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published

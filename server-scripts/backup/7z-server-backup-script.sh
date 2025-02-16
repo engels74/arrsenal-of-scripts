@@ -331,7 +331,7 @@ exit 0
 # Server Backup Script
 # <https://github.com/engels74/arrsenal-of-scripts>
 # This script backups up files and directories using 7-zip
-# Copyright (C) 2024 - engels74
+# Copyright (C) 2025 - engels74
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published

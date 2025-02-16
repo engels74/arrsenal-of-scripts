@@ -152,7 +152,7 @@ echo -e "${GREEN}Script execution complete.${NC}"
 # Dashboard Icons Script
 # <https://github.com/engels74/arrsenal-of-scripts>
 # This script modifies the URL of dashboard icons in YAML files
-# Copyright (C) 2024 - engels74
+# Copyright (C) 2025 - engels74
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published

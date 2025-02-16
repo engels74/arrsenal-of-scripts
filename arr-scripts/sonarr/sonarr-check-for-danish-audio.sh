@@ -176,7 +176,7 @@ exit 1
 # Danish Audio Script
 # <https://github.com/engels74/arrsenal-of-scripts>
 # This script checks for Danish audio in downloaded files
-# Copyright (C) 2024 - engels74
+# Copyright (C) 2025 - engels74
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published
