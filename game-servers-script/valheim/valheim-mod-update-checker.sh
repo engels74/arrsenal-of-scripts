@@ -227,7 +227,7 @@ log_message "${BOLD}${CYAN}Mod update check completed${RESET}"
 # License
 # -----------------------------------------------------------------------------
 
-# Dashboard Icons Script
+# Valheim Mod Update Checker
 # <https://github.com/engels74/arrsenal-of-scripts>
 # This script modifies the URL of dashboard icons in YAML files
 # Copyright (C) 2025 - engels74
