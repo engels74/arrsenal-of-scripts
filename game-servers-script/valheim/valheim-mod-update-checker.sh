@@ -229,7 +229,7 @@ log_message "${BOLD}${CYAN}Mod update check completed${RESET}"
 
 # Valheim Mod Update Checker
 # <https://github.com/engels74/arrsenal-of-scripts>
-# This script modifies the URL of dashboard icons in YAML files
+# This script checks for updates for Valheim mods on ThunderStore.io via its API
 # Copyright (C) 2025 - engels74
 #
 # This program is free software: you can redistribute it and/or modify
