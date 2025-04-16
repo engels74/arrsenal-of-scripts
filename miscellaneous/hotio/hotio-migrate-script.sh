@@ -3,7 +3,7 @@
 # --- Script Description ---
 # Purpose: Guides the user through updating DNS and VPN environment variables
 #          within Docker Compose YAML files, specifically targeting services
-#          that utilize 'hotio/' or 'engels74/' images. This facilitates migration
+#          that utilize 'hotio' or 'engels74' images. This facilitates migration
 #          to newer configuration standards for these containers.
 # Action:  Recursively finds *.yml/*.yaml files, identifies relevant services,
 #          interactively prompts for desired VPN/Unbound settings (VPN_ENABLED,
