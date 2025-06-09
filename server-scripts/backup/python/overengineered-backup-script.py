@@ -57,7 +57,7 @@ except ImportError:
 # Uptime Kuma integration dependencies
 try:
     import pytz  # pyright: ignore[reportMissingModuleSource]
-    from uptime_kuma_api import UptimeKumaApi, MaintenanceStrategy  # pyright: ignore[reportMissingImports]
+    from uptime_kuma_api import UptimeKumaApi, MaintenanceStrategy  # pyright: ignore[reportMissingImports, reportUnknownVariableType]
 except ImportError:
     print(
         "Warning: Uptime Kuma dependencies not installed. Maintenance window functionality will be disabled."
@@ -281,16 +281,16 @@ class UptimeKumaRetry:
 
         while retry_count < self.max_retries:
             try:
-                if self.api is not None:
+                if self.api is not None:  # pyright: ignore[reportUnknownMemberType]
                     try:
-                        _ = self.api.disconnect()  # pyright: ignore[reportAttributeAccessIssue]
+                        _ = self.api.disconnect()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownVariableType, reportUnknownMemberType]
                     except Exception:
                         pass
 
                 self.api = UptimeKumaApi(self.url, timeout=30)
-                _ = self.api.login(self.username, self.password)  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                _ = self.api.login(self.username, self.password)  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownVariableType, reportUnknownMemberType]
                 log.info("Successfully connected to Uptime Kuma")
-                return self.api
+                return self.api  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
             except Exception as e:
                 retry_count += 1
@@ -354,7 +354,7 @@ class UptimeKumaRetry:
         """Context manager exit."""
         if self.api is not None:
             try:
-                _ = self.api.disconnect()  # pyright: ignore[reportAttributeAccessIssue]
+                _ = self.api.disconnect()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownVariableType, reportUnknownMemberType]
             except Exception:
                 pass
 
@@ -392,7 +392,7 @@ def create_backup_maintenance_window() -> int | None:
             # Get server timezone
             server_info = cast(
                 ServerInfo,
-                cast(object, kuma.retry_operation(kuma.api.info)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                cast(object, kuma.retry_operation(kuma.api.info)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
             )
             server_timezone = pytz.timezone(str(server_info["serverTimezone"]))
             log.info(f"Using server timezone: {server_timezone}")
@@ -403,10 +403,10 @@ def create_backup_maintenance_window() -> int | None:
                 cast(
                     object,
                     kuma.retry_operation(
-                        kuma.api.add_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                        kuma.api.add_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
                         title="Server Backup in Progress",
                         description="Automated server backup is currently running. Services may be temporarily unavailable.",
-                        strategy=MaintenanceStrategy.MANUAL,
+                        strategy=MaintenanceStrategy.MANUAL,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                         active=True,
                         timezoneOption=str(server_timezone),
                     ),
@@ -419,14 +419,14 @@ def create_backup_maintenance_window() -> int | None:
             # Add all monitors to maintenance window
             monitors = cast(
                 MonitorList,
-                cast(object, kuma.retry_operation(kuma.api.get_monitors)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                cast(object, kuma.retry_operation(kuma.api.get_monitors)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
             )
             monitor_ids: MonitorIdList = [{"id": monitor["id"]} for monitor in monitors]
 
             if monitor_ids:
                 log.info(f"Adding {len(monitor_ids)} monitors to maintenance window")
-                _ = kuma.retry_operation(
-                    kuma.api.add_monitor_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
+                    kuma.api.add_monitor_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
                     maintenance_id,
                     monitor_ids,
                 )
@@ -435,7 +435,7 @@ def create_backup_maintenance_window() -> int | None:
             # Add status page to maintenance window
             status_pages = cast(
                 StatusPageList,
-                cast(object, kuma.retry_operation(kuma.api.get_status_pages)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                cast(object, kuma.retry_operation(kuma.api.get_status_pages)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
             )
             status_page = next(
                 (
@@ -450,8 +450,8 @@ def create_backup_maintenance_window() -> int | None:
                 log.info(
                     f"Adding status page '{UPTIME_KUMA_STATUS_PAGE_SLUG}' to maintenance window"
                 )
-                _ = kuma.retry_operation(
-                    kuma.api.add_status_page_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
+                    kuma.api.add_status_page_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
                     maintenance_id,
                     [{"id": status_page["id"]}],
                 )
@@ -518,7 +518,7 @@ def remove_backup_maintenance_window() -> None:
                 cast(
                     object,
                     kuma.retry_operation(
-                        kuma.api.delete_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                        kuma.api.delete_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
                         maintenance_id,
                     ),
                 ),
