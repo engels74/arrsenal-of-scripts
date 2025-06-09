@@ -8,6 +8,7 @@
 # ///
 
 #!/usr/bin/env python3
+# pyright: reportMissingModuleSource=false, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportUnknownArgumentType=false
 #
 # -----------------------------------------------------------------------------
 # server-backup.py
@@ -16,7 +17,6 @@
 #
 # Features:
 # - Creates local encrypted backups using tar, pigz/gzip, and OpenSSL.
-# - Optionally uses 'pv' to show progress during compression.
 # - Manages Docker services, with priority restart for critical containers.
 # - Uploads backups to a cloud remote using rclone.
 # - Sends detailed status notifications to a Discord webhook.
@@ -26,7 +26,6 @@
 # Requirements:
 # - Python 3.13+
 # - rclone, tar, pigz/gzip, openssl, docker
-# - (Optional) pv for progress display (e.g., `sudo apt-get install pv`)
 # - Python 'requests' library (`uv pip install requests`)
 # - (Optional) privatebin (from gearnode/privatebin)
 # -----------------------------------------------------------------------------
@@ -44,7 +43,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import TypedDict, Callable, TypeVar, cast, IO, TYPE_CHECKING
+from typing import TypedDict, Callable, TypeVar, cast, TYPE_CHECKING
 
 
 # This script requires the 'requests' library for Discord notifications.
@@ -59,7 +58,7 @@ except ImportError:
 # Uptime Kuma integration dependencies
 try:
     import pytz
-    from uptime_kuma_api import UptimeKumaApi, MaintenanceStrategy  # pyright: ignore[reportMissingTypeStubs]
+    from uptime_kuma_api import UptimeKumaApi, MaintenanceStrategy
 except ImportError:
     print(
         "Warning: Uptime Kuma dependencies not installed. Maintenance window functionality will be disabled."
@@ -285,12 +284,12 @@ class UptimeKumaRetry:
             try:
                 if self.api is not None:
                     try:
-                        _ = self.api.disconnect()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+                        _ = self.api.disconnect()
                     except Exception:
                         pass
 
                 self.api = UptimeKumaApi(self.url, timeout=30)
-                _ = self.api.login(self.username, self.password)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                _ = self.api.login(self.username, self.password)
                 log.info("Successfully connected to Uptime Kuma")
                 return self.api
 
@@ -356,7 +355,7 @@ class UptimeKumaRetry:
         """Context manager exit."""
         if self.api is not None:
             try:
-                _ = self.api.disconnect()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+                _ = self.api.disconnect()
             except Exception:
                 pass
 
@@ -394,7 +393,7 @@ def create_backup_maintenance_window() -> int | None:
             # Get server timezone
             server_info = cast(
                 ServerInfo, cast(object, kuma.retry_operation(kuma.api.info))
-            )  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            )
             server_timezone = pytz.timezone(str(server_info["serverTimezone"]))
             log.info(f"Using server timezone: {server_timezone}")
 
@@ -404,7 +403,7 @@ def create_backup_maintenance_window() -> int | None:
                 cast(
                     object,
                     kuma.retry_operation(
-                        kuma.api.add_maintenance,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+                        kuma.api.add_maintenance,
                         title="Server Backup in Progress",
                         description="Automated server backup is currently running. Services may be temporarily unavailable.",
                         strategy=MaintenanceStrategy.MANUAL,
@@ -420,13 +419,13 @@ def create_backup_maintenance_window() -> int | None:
             # Add all monitors to maintenance window
             monitors = cast(
                 MonitorList, cast(object, kuma.retry_operation(kuma.api.get_monitors))
-            )  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            )
             monitor_ids: MonitorIdList = [{"id": monitor["id"]} for monitor in monitors]
 
             if monitor_ids:
                 log.info(f"Adding {len(monitor_ids)} monitors to maintenance window")
-                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
-                    kuma.api.add_monitor_maintenance,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+                _ = kuma.retry_operation(
+                    kuma.api.add_monitor_maintenance,
                     maintenance_id,
                     monitor_ids,
                 )
@@ -436,7 +435,7 @@ def create_backup_maintenance_window() -> int | None:
             status_pages = cast(
                 StatusPageList,
                 cast(object, kuma.retry_operation(kuma.api.get_status_pages)),
-            )  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            )
             status_page = next(
                 (
                     page
@@ -450,8 +449,8 @@ def create_backup_maintenance_window() -> int | None:
                 log.info(
                     f"Adding status page '{UPTIME_KUMA_STATUS_PAGE_SLUG}' to maintenance window"
                 )
-                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
-                    kuma.api.add_status_page_maintenance,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+                _ = kuma.retry_operation(
+                    kuma.api.add_status_page_maintenance,
                     maintenance_id,
                     [{"id": status_page["id"]}],
                 )
@@ -519,7 +518,7 @@ def remove_backup_maintenance_window() -> None:
                     object,
                     kuma.retry_operation(
                         kuma.api.delete_maintenance,
-                        maintenance_id,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+                        maintenance_id,
                     ),
                 ),
             )
@@ -937,32 +936,13 @@ def create_backup(backup_file: Path) -> bool:
         # Compress and Encrypt the tarball
         with open(temp_tar_file, "rb") as tar_in, open(backup_file, "wb") as final_out:
             procs: list[subprocess.Popen[bytes]] = []
-            last_proc_stdout: IO[bytes] | int | None = None
-
-            # Optionally add 'pv' to the pipeline for progress
-            if shutil.which("pv"):
-                log.info("Using 'pv' to monitor compression and encryption progress.")
-                file_size = temp_tar_file.stat().st_size
-                # pv progress goes to stderr by default. The script's logging captures stderr.
-                pv_proc = subprocess.Popen(
-                    ["pv", "-N", "Compressing/Encrypting", "-s", str(file_size)],
-                    stdin=tar_in,
-                    stdout=subprocess.PIPE,
-                )
-                procs.append(pv_proc)
-                last_proc_stdout = pv_proc.stdout
-            else:
-                log.info("'pv' not found, skipping progress display.")
-                last_proc_stdout = tar_in
 
             # Add compression to the pipeline
             compress_proc = subprocess.Popen(
                 [BACKUP_COMPRESSION_TOOL, f"-{BACKUP_COMPRESSION_LEVEL}"],
-                stdin=last_proc_stdout,
+                stdin=tar_in,
                 stdout=subprocess.PIPE,
             )
-            if len(procs) > 0 and procs[-1].stdout:
-                procs[-1].stdout.close()
             procs.append(compress_proc)
             last_proc_stdout = compress_proc.stdout
 
@@ -981,8 +961,8 @@ def create_backup(backup_file: Path) -> bool:
                 stdin=last_proc_stdout,
                 stdout=final_out,
             )
-            if len(procs) > 0 and procs[-1].stdout:
-                procs[-1].stdout.close()
+            if compress_proc.stdout:
+                compress_proc.stdout.close()
             procs.append(encrypt_proc)
 
             # Wait for all processes in the pipeline to complete
@@ -1000,8 +980,12 @@ def create_backup(backup_file: Path) -> bool:
                         else:
                             # Convert each argument to string safely, handling PathLike objects
                             try:
-                                cmd_str = " ".join(str(arg) for arg in proc.args)  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType, reportGeneralTypeIssues]
-                            except TypeError:
+                                # Check if proc.args is a list or tuple (sequence types we can iterate)
+                                if isinstance(proc.args, (list, tuple)):
+                                    cmd_str = " ".join(str(arg) for arg in proc.args)
+                                else:
+                                    cmd_str = str(proc.args)
+                            except (TypeError, AttributeError):
                                 # Fallback if args is not iterable
                                 cmd_str = str(proc.args)
                     else:
@@ -1088,6 +1072,20 @@ def set_permissions(backup_file: Path) -> None:
         log.critical(f"Failed to set permissions on {backup_file}: {e}")
 
 
+def set_log_permissions(log_file: Path) -> None:
+    """Set ownership of log file to the backup user."""
+    if dry_run_mode:
+        return
+    log.info("Setting log file permissions...")
+    try:
+        uid = pwd.getpwnam(BACKUP_USER).pw_uid
+        gid = grp.getgrnam(BACKUP_GROUP).gr_gid
+        os.chown(log_file, uid, gid)
+        os.chmod(log_file, 0o644)
+    except (KeyError, OSError) as e:
+        log.error(f"Failed to set permissions on log file {log_file}: {e}")
+
+
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
@@ -1109,6 +1107,9 @@ def main() -> None:
     LOG_ROOT_DIR.mkdir(parents=True, exist_ok=True)
     log_file = LOG_ROOT_DIR / f"{timestamp}-backupScript.log"
     setup_logging(log_file)
+
+    # Set proper ownership for the log file
+    set_log_permissions(log_file)
 
     if dry_run_mode:
         log.info("--- Starting DRY RUN ---")
@@ -1184,7 +1185,7 @@ def main() -> None:
                         f"🔍 Checks: {rclone_summary['checks_count']} / {rclone_summary['total_checks']}\n"
                     )
                     if privatebin_link:
-                        message += "🔗 View Logs\n\n"
+                        message += f"🔗 **[View Full Log]({privatebin_link})**\n\n"
                     else:
                         message += "\n"
 
