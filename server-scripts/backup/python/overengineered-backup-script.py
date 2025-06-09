@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import TypedDict, Callable, TypeVar, cast, IO, TYPE_CHECKING
@@ -943,14 +944,61 @@ def create_backup(backup_file: Path) -> bool:
             if shutil.which("pv"):
                 log.info("Using 'pv' to monitor compression and encryption progress.")
                 file_size = temp_tar_file.stat().st_size
-                # pv progress goes to stderr by default. The script's logging captures stderr.
-                pv_proc = subprocess.Popen(
-                    ["pv", "-N", "Compressing/Encrypting", "-s", str(file_size)],
-                    stdin=tar_in,
-                    stdout=subprocess.PIPE,
-                )
+
+                # Create a temporary file to capture pv's stderr output
+                pv_log_file = temp_tar_file.with_suffix(".pv.log")
+
+                # pv progress goes to stderr, redirect it to a log file so we can capture it
+                with open(pv_log_file, "w") as pv_stderr:
+                    pv_proc = subprocess.Popen(
+                        ["pv", "-N", "Compressing/Encrypting", "-s", str(file_size)],
+                        stdin=tar_in,
+                        stdout=subprocess.PIPE,
+                        stderr=pv_stderr,
+                    )
                 procs.append(pv_proc)
                 last_proc_stdout = pv_proc.stdout
+
+                # Start a thread to read pv output and log it
+                import threading
+                def log_pv_progress():
+                    try:
+                        # Wait a bit for pv to start writing
+                        import time
+                        time.sleep(0.1)
+                        if pv_log_file.exists():
+                            with open(pv_log_file, "r") as f:
+                                # Read the file periodically and log progress
+                                last_pos = 0
+                                while pv_proc.poll() is None:
+                                    _ = f.seek(last_pos)
+                                    new_content = f.read()
+                                    if new_content:
+                                        # Log each line of pv output
+                                        for line in new_content.strip().split('\n'):
+                                            if line.strip():
+                                                log.info(f"Progress: {line.strip()}")
+                                        last_pos = f.tell()
+                                    time.sleep(1)
+                                # Read any remaining content
+                                _ = f.seek(last_pos)
+                                remaining = f.read()
+                                if remaining:
+                                    for line in remaining.strip().split('\n'):
+                                        if line.strip():
+                                            log.info(f"Progress: {line.strip()}")
+                    except Exception as e:
+                        log.warning(f"Failed to capture pv progress: {e}")
+                    finally:
+                        # Clean up the temporary pv log file
+                        try:
+                            if pv_log_file.exists():
+                                pv_log_file.unlink()
+                        except Exception:
+                            pass
+
+                progress_thread = threading.Thread(target=log_pv_progress, daemon=True)
+                progress_thread.start()
             else:
                 log.info("'pv' not found, skipping progress display.")
                 last_proc_stdout = tar_in
@@ -1088,6 +1136,22 @@ def set_permissions(backup_file: Path) -> None:
         log.critical(f"Failed to set permissions on {backup_file}: {e}")
 
 
+def set_log_permissions(log_file: Path) -> None:
+    """Set proper ownership on log files to match BACKUP_USER."""
+    if dry_run_mode:
+        return
+    log.info(f"Setting log file permissions for {log_file.name}...")
+    try:
+        uid = pwd.getpwnam(BACKUP_USER).pw_uid
+        gid = grp.getgrnam(BACKUP_GROUP).gr_gid
+        os.chown(log_file, uid, gid)
+        os.chmod(log_file, 0o644)  # Log files can be readable by group
+        log.info(f"Log file ownership set to {BACKUP_USER}:{BACKUP_GROUP}")
+    except (KeyError, OSError) as e:
+        log.error(f"Failed to set log file permissions on {log_file}: {e}")
+        # Don't fail the backup for log permission issues
+
+
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
@@ -1109,6 +1173,9 @@ def main() -> None:
     LOG_ROOT_DIR.mkdir(parents=True, exist_ok=True)
     log_file = LOG_ROOT_DIR / f"{timestamp}-backupScript.log"
     setup_logging(log_file)
+
+    # Set proper ownership on the log file
+    set_log_permissions(log_file)
 
     if dry_run_mode:
         log.info("--- Starting DRY RUN ---")
@@ -1184,7 +1251,7 @@ def main() -> None:
                         f"🔍 Checks: {rclone_summary['checks_count']} / {rclone_summary['total_checks']}\n"
                     )
                     if privatebin_link:
-                        message += "🔗 View Logs\n\n"
+                        message += f"🔗 **[View Logs]({privatebin_link})**\n\n"
                     else:
                         message += "\n"
 

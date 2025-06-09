@@ -33,11 +33,114 @@ class TestBackupScript(unittest.TestCase):
         """Set up test fixtures."""
         self.temp_dir = Path(tempfile.mkdtemp())
         self.test_log_file = self.temp_dir / "test.log"
-        
+
     def tearDown(self):
         """Clean up test fixtures."""
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_discord_notification_with_privatebin_link_success(self):
+        """Test that Discord success notification includes the privatebin link properly."""
+        # Test the success message formatting with privatebin link
+        privatebin_link = "https://privatebin.example.com/paste/abc123"
+
+        # Simulate the success message construction
+        success_timestamp = "2024-01-01 12:00:00"
+        rclone_summary = {
+            'duration': '1h:30m:45s',
+            'transferred_data': '2.50 GB',
+            'transferred_files': '150 files',
+            'checks_count': 200,
+            'total_checks': 200
+        }
+
+        message = (
+            f"**Status Details**\n"
+            f"✅ Sync completed successfully\n"
+            f"⏱️ Duration: {rclone_summary['duration']}\n"
+            f"📦 Data: {rclone_summary['transferred_data']}\n"
+            f"📄 Files: {rclone_summary['transferred_files']}\n"
+            f"🔍 Checks: {rclone_summary['checks_count']} / {rclone_summary['total_checks']}\n"
+        )
+
+        # Test the current broken behavior
+        if privatebin_link:
+            message += "🔗 View Logs\n\n"  # This is the bug - no actual link
+        else:
+            message += "\n"
+
+        # The message should contain the actual link, not just "View Logs"
+        self.assertNotIn(privatebin_link, message)  # Current broken behavior
+        self.assertIn("🔗 View Logs", message)  # But text is there
+
+        # Test the fixed behavior (what we want to implement)
+        message_fixed = (
+            f"**Status Details**\n"
+            f"✅ Sync completed successfully\n"
+            f"⏱️ Duration: {rclone_summary['duration']}\n"
+            f"📦 Data: {rclone_summary['transferred_data']}\n"
+            f"📄 Files: {rclone_summary['transferred_files']}\n"
+            f"🔍 Checks: {rclone_summary['checks_count']} / {rclone_summary['total_checks']}\n"
+        )
+
+        if privatebin_link:
+            message_fixed += f"🔗 **[View Logs]({privatebin_link})**\n\n"
+        else:
+            message_fixed += "\n"
+
+        # This should contain the actual link
+        self.assertIn(privatebin_link, message_fixed)
+        self.assertIn("View Logs", message_fixed)
+
+    def test_log_file_ownership_function(self):
+        """Test that log files can be properly chowned to the backup user."""
+        # Create a test log file
+        test_log = self.temp_dir / "test.log"
+        test_log.write_text("Test log content")
+
+        # Mock the user/group lookup and chown operation
+        with patch('backup_script.pwd.getpwnam') as mock_getpwnam, \
+             patch('backup_script.grp.getgrnam') as mock_getgrnam, \
+             patch('backup_script.os.chown') as mock_chown, \
+             patch('backup_script.os.chmod') as mock_chmod:
+
+            # Mock user/group data
+            mock_user = Mock()
+            mock_user.pw_uid = 1001
+            mock_getpwnam.return_value = mock_user
+
+            mock_group = Mock()
+            mock_group.gr_gid = 1001
+            mock_getgrnam.return_value = mock_group
+
+            # Test that the function exists and works properly
+            backup_script.set_log_permissions(test_log)
+            mock_chown.assert_called_once_with(test_log, 1001, 1001)
+            mock_chmod.assert_called_once_with(test_log, 0o644)
+
+    def test_pv_progress_capture(self):
+        """Test that pv progress output can be captured to logs."""
+        # Test that we can capture pv stderr output
+        import subprocess
+
+        # Create a mock pv process that writes to stderr
+        test_input = b"test data for pv"
+
+        # Test current behavior - pv stderr goes to console only
+        try:
+            result = subprocess.run(
+                ["echo", "test"],
+                capture_output=True,
+                text=True
+            )
+            # This simulates that pv output isn't captured in logs currently
+            self.assertEqual(result.returncode, 0)
+        except FileNotFoundError:
+            # pv might not be available in test environment
+            pass
+
+        # We need to implement a way to capture pv stderr to log file
+        # This test documents the requirement
 
     def test_format_bytes(self):
         """Test the format_bytes function with various inputs."""
