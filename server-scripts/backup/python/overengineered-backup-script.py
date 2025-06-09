@@ -44,7 +44,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, TypedDict, Callable, TypeVar, cast
+from typing import TypedDict, Callable, TypeVar, cast, IO, TYPE_CHECKING
 
 
 # This script requires the 'requests' library for Discord notifications.
@@ -189,6 +189,27 @@ class DeleteMaintenanceResponse(TypedDict):
 MonitorList = list[Monitor]
 StatusPageList = list[StatusPage]
 MonitorIdList = list[MonitorId]
+
+# JSON data types for rclone log parsing
+class RcloneStats(TypedDict):
+    """Rclone statistics from JSON log."""
+    transfers: int
+    bytes: int
+    errors: int
+    checks: int
+    totalBytes: int
+
+class RcloneLogEntry(TypedDict):
+    """Rclone log entry structure."""
+    level: str
+    msg: str
+    stats: RcloneStats
+
+# Type alias for JSON data
+if TYPE_CHECKING:
+    JsonDict = dict[str, str | int | float | bool | None | "JsonDict" | list["JsonDict"]]
+else:
+    JsonDict = dict
 
 # -----------------------------------------------------------------------------
 # Global Variables
@@ -611,7 +632,7 @@ def run_rclone_sync(log_file: Path) -> dict[str, str | int]:
     duration = time.monotonic() - start_time
 
     # Parse stats from the JSON log file
-    final_stats: dict[str, Any] = {}
+    final_stats: JsonDict = {}
     error_lines: list[str] = []
     with open(log_file, "r") as f:
         for line in f:
@@ -620,14 +641,18 @@ def run_rclone_sync(log_file: Path) -> dict[str, str | int]:
             if not line.strip().startswith("{"):
                 continue
             try:
-                log_entry = json.loads(line)
-                if not isinstance(log_entry, dict):
+                # Parse JSON and ensure it's a dictionary
+                parsed_json: object = json.loads(line)  # pyright: ignore[reportAny]
+                if not isinstance(parsed_json, dict):
                     continue
+
+                log_entry = cast(JsonDict, parsed_json)
 
                 # The summary stats from rclone are in a log entry
                 # containing a 'stats' object. We grab the last one found.
-                if "stats" in log_entry and isinstance(log_entry.get("stats"), dict):
-                    final_stats = log_entry["stats"]
+                stats_data = log_entry.get("stats")
+                if "stats" in log_entry and isinstance(stats_data, dict):
+                    final_stats = stats_data
 
                 elif log_entry.get("level") == "error":
                     msg = log_entry.get("msg")
@@ -636,13 +661,27 @@ def run_rclone_sync(log_file: Path) -> dict[str, str | int]:
             except json.JSONDecodeError:
                 continue  # Ignore non-JSON lines
 
+    # Safely extract values with proper type checking
+    transfers = final_stats.get('transfers', 0)
+    bytes_transferred = final_stats.get('bytes', 0)
+    errors_count = final_stats.get("errors", len(error_lines))
+    checks_count = final_stats.get('checks', 0)
+    total_bytes = final_stats.get('totalBytes', 0)
+
+    # Ensure we have integers for calculations
+    transfers = int(transfers) if isinstance(transfers, (int, float)) else 0
+    bytes_transferred = int(bytes_transferred) if isinstance(bytes_transferred, (int, float)) else 0
+    errors_count = int(errors_count) if isinstance(errors_count, (int, float)) else len(error_lines)
+    checks_count = int(checks_count) if isinstance(checks_count, (int, float)) else 0
+    total_bytes = int(total_bytes) if isinstance(total_bytes, (int, float)) else 0
+
     stats = {
         "status": "success" if exit_code == 0 else "failed",
         "exit_code": exit_code,
         "duration": f"{int(duration // 3600)}h {int((duration % 3600) // 60)}m {int(duration % 60)}s",
-        "transferred": f"{final_stats.get('transfers', 0)} files, {format_bytes(int(final_stats.get('bytes', 0)))}",
-        "errors": str(final_stats.get("errors", len(error_lines))),
-        "checks": f"{final_stats.get('checks', 0)} files, {format_bytes(int(final_stats.get('totalBytes', 0)))}",
+        "transferred": f"{transfers} files, {format_bytes(bytes_transferred)}",
+        "errors": str(errors_count),
+        "checks": f"{checks_count} files, {format_bytes(total_bytes)}",
         "last_error": "\n".join(error_lines[-3:]) if error_lines else "None",
     }
 
@@ -780,7 +819,7 @@ def create_backup(backup_file: Path) -> bool:
         if PLEX_DATA_DIR.exists():
             plex_parent = PLEX_DATA_DIR.parent
             plex_name = PLEX_DATA_DIR.name
-            subprocess.run(
+            _ = subprocess.run(
                 ["tar", "-cf", str(temp_tar_file), "-C", str(plex_parent), plex_name],
                 check=True, capture_output=True, text=True,
             )
@@ -797,39 +836,40 @@ def create_backup(backup_file: Path) -> bool:
                 + exclude_opts
                 + valid_backup_dirs
             )
-            subprocess.run(tar_command, check=True, capture_output=True, text=True)
+            _ = subprocess.run(tar_command, check=True, capture_output=True, text=True)
 
         # Compress and Encrypt the tarball
         with open(temp_tar_file, "rb") as tar_in, open(backup_file, "wb") as final_out:
-            procs = []
-            last_proc_stdout = tar_in
+            procs: list[subprocess.Popen[bytes]] = []
+            last_proc_stdout: IO[bytes] | int | None = None
 
             # Optionally add 'pv' to the pipeline for progress
             if shutil.which("pv"):
                 log.info("Using 'pv' to monitor compression and encryption progress.")
                 file_size = temp_tar_file.stat().st_size
                 # pv progress goes to stderr by default. The script's logging captures stderr.
-                p = subprocess.Popen(
+                pv_proc = subprocess.Popen(
                     ["pv", "-N", "Compressing/Encrypting", "-s", str(file_size)],
-                    stdin=last_proc_stdout, stdout=subprocess.PIPE
+                    stdin=tar_in, stdout=subprocess.PIPE
                 )
-                procs.append(p)
-                last_proc_stdout = p.stdout
+                procs.append(pv_proc)
+                last_proc_stdout = pv_proc.stdout
             else:
                 log.info("'pv' not found, skipping progress display.")
+                last_proc_stdout = tar_in
 
             # Add compression to the pipeline
-            p = subprocess.Popen(
+            compress_proc = subprocess.Popen(
                 [BACKUP_COMPRESSION_TOOL, f"-{BACKUP_COMPRESSION_LEVEL}"],
                 stdin=last_proc_stdout, stdout=subprocess.PIPE
             )
             if len(procs) > 0 and procs[-1].stdout:
                 procs[-1].stdout.close()
-            procs.append(p)
-            last_proc_stdout = p.stdout
+            procs.append(compress_proc)
+            last_proc_stdout = compress_proc.stdout
 
             # Add encryption as the final stage of the pipeline
-            p = subprocess.Popen(
+            encrypt_proc = subprocess.Popen(
                 [
                     "openssl", "enc", "-aes-256-cbc", "-md", "sha256",
                     "-pass", f"file:{BACKUP_PASSWORD_FILE.resolve()}", "-pbkdf2",
@@ -838,16 +878,30 @@ def create_backup(backup_file: Path) -> bool:
             )
             if len(procs) > 0 and procs[-1].stdout:
                 procs[-1].stdout.close()
-            procs.append(p)
+            procs.append(encrypt_proc)
 
             # Wait for all processes in the pipeline to complete
-            for p in procs:
-                p.wait()
+            for proc in procs:
+                _ = proc.wait()
 
             # Check for errors in any part of the pipeline
-            for p in procs:
-                if p.returncode != 0:
-                    raise subprocess.CalledProcessError(p.returncode, " ".join(map(str, p.args)))
+            for proc in procs:
+                if proc.returncode != 0:
+                    # Handle args properly - convert to list of strings
+                    if proc.args:
+                        # proc.args can be a string or sequence, handle both cases
+                        if isinstance(proc.args, str):
+                            cmd_str = proc.args
+                        else:
+                            # Convert each argument to string safely, handling PathLike objects
+                            try:
+                                cmd_str = " ".join(str(arg) for arg in proc.args)  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType, reportGeneralTypeIssues]
+                            except TypeError:
+                                # Fallback if args is not iterable
+                                cmd_str = str(proc.args)
+                    else:
+                        cmd_str = "unknown"
+                    raise subprocess.CalledProcessError(proc.returncode, cmd_str)
 
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         log.critical(f"Backup creation failed: {e}")
