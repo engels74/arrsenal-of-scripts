@@ -574,9 +574,20 @@ def run_rclone_sync(log_file: Path) -> dict[str, str | int]:
 
     start_time = time.monotonic()
 
+    # Format start message with new structure
+    start_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    start_message = (
+        f"**Status Details**\n"
+        f"Beginning sync operation...\n\n"
+        f"**Sync Info**\n"
+        f"Source: `{RCLONE_SOURCE_DIR}`\n"
+        f"Destination: `{RCLONE_REMOTE_DEST}`\n\n"
+        f"**Timestamp**\n"
+        f"{start_timestamp}"
+    )
     send_discord_notification(
         "Started",
-        f"Uploading from `{RCLONE_SOURCE_DIR}` to `{RCLONE_REMOTE_DEST}`.",
+        start_message,
         16776960,  # Yellow
         title_override="Rclone Sync Status: Started",
     )
@@ -678,10 +689,14 @@ def run_rclone_sync(log_file: Path) -> dict[str, str | int]:
     stats = {
         "status": "success" if exit_code == 0 else "failed",
         "exit_code": exit_code,
-        "duration": f"{int(duration // 3600)}h {int((duration % 3600) // 60)}m {int(duration % 60)}s",
+        "duration": f"{int(duration // 3600)}h:{int((duration % 3600) // 60)}m:{int(duration % 60)}s",
         "transferred": f"{transfers} files, {format_bytes(bytes_transferred)}",
+        "transferred_files": f"{transfers} files",
+        "transferred_data": format_bytes(bytes_transferred),
         "errors": str(errors_count),
         "checks": f"{checks_count} files, {format_bytes(total_bytes)}",
+        "checks_count": checks_count,
+        "total_checks": checks_count,  # For now, assume all checks were completed
         "last_error": "\n".join(error_lines[-3:]) if error_lines else "None",
     }
 
@@ -1062,14 +1077,28 @@ def main() -> None:
             if rclone_summary["status"] != "skipped":
                 privatebin_link = upload_log_to_privatebin(log_file)
                 if rclone_summary["status"] == "success":
+                    # Format success message with new structure
+                    success_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     message = (
-                        f"✅ **Sync completed successfully**\n"
-                        f"⏱️ **Duration:** {rclone_summary['duration']}\n"
-                        f"📦 **Transferred:** {rclone_summary['transferred']}\n"
-                        f"🔍 **Checks:** {rclone_summary['checks']}"
+                        f"**Status Details**\n"
+                        f"✅ Sync completed successfully\n"
+                        f"⏱️ Duration: {rclone_summary['duration']}\n"
+                        f"📦 Data: {rclone_summary['transferred_data']}\n"
+                        f"📄 Files: {rclone_summary['transferred_files']}\n"
+                        f"🔍 Checks: {rclone_summary['checks_count']} / {rclone_summary['total_checks']}\n"
                     )
                     if privatebin_link:
-                        message += f"\n🔗 **[View Full Log]({privatebin_link})**"
+                        message += f"🔗 View Logs\n\n"
+                    else:
+                        message += "\n"
+
+                    message += (
+                        f"**Sync Info**\n"
+                        f"Source: `{RCLONE_SOURCE_DIR}`\n"
+                        f"Destination: `{RCLONE_REMOTE_DEST}`\n\n"
+                        f"**Timestamp**\n"
+                        f"{success_timestamp}"
+                    )
                     send_discord_notification(
                         "Success", message, 65280, "Rclone Sync Status: Success"
                     )
