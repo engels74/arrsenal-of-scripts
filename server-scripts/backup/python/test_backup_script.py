@@ -10,10 +10,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch, mock_open
+from unittest.mock import Mock, patch
 import sys
 import os
-import importlib.util
 
 # Add the script directory to the path so we can import the module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
