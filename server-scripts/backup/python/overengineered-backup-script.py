@@ -391,7 +391,8 @@ def create_backup_maintenance_window() -> int | None:
         ) as kuma:
             # Get server timezone
             server_info = cast(
-                ServerInfo, cast(object, kuma.retry_operation(kuma.api.info))  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                ServerInfo,
+                cast(object, kuma.retry_operation(kuma.api.info)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
             )
             server_timezone = pytz.timezone(str(server_info["serverTimezone"]))
             log.info(f"Using server timezone: {server_timezone}")
@@ -417,7 +418,8 @@ def create_backup_maintenance_window() -> int | None:
 
             # Add all monitors to maintenance window
             monitors = cast(
-                MonitorList, cast(object, kuma.retry_operation(kuma.api.get_monitors))  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                MonitorList,
+                cast(object, kuma.retry_operation(kuma.api.get_monitors)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
             )
             monitor_ids: MonitorIdList = [{"id": monitor["id"]} for monitor in monitors]
 
