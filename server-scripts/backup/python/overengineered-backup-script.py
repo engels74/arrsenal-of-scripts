@@ -156,58 +156,78 @@ MAINTENANCE_ID_FILE = Path("/tmp/backup_maintenance_id.txt")
 # -----------------------------------------------------------------------------
 
 # Type variable for generic return type
-T = TypeVar('T')
+T = TypeVar("T")
+
 
 class ServerInfo(TypedDict):
     """Server information response from info() API call."""
+
     serverTimezone: str
+
 
 class MaintenanceResponse(TypedDict):
     """Response from add_maintenance() API call."""
+
     maintenanceID: int
+
 
 class Monitor(TypedDict):
     """Monitor object from get_monitors() API call."""
+
     id: int
     name: str
 
+
 class StatusPage(TypedDict):
     """Status page object from get_status_pages() API call."""
+
     id: int
     slug: str
     title: str
 
+
 class MonitorId(TypedDict):
     """Monitor ID object for maintenance operations."""
+
     id: int
+
 
 class DeleteMaintenanceResponse(TypedDict):
     """Response from delete_maintenance() API call."""
+
     msg: str
+
 
 # Type aliases for common return types
 MonitorList = list[Monitor]
 StatusPageList = list[StatusPage]
 MonitorIdList = list[MonitorId]
 
+
 # JSON data types for rclone log parsing
 class RcloneStats(TypedDict):
     """Rclone statistics from JSON log."""
+
     transfers: int
     bytes: int
     errors: int
     checks: int
     totalBytes: int
 
+
 class RcloneLogEntry(TypedDict):
     """Rclone log entry structure."""
+
     level: str
     msg: str
     stats: RcloneStats
 
+
 # Type alias for JSON data
 if TYPE_CHECKING:
-    JsonDict = dict[str, str | int | float | bool | None | "JsonDict" | list["JsonDict"]]
+    JsonDict = dict[
+        str, str | int | float | bool | None | "JsonDict" | list["JsonDict"]
+    ]
 else:
     JsonDict = dict
 
@@ -220,6 +240,7 @@ dry_run_mode = False
 # -----------------------------------------------------------------------------
 # Uptime Kuma Integration Classes
 # -----------------------------------------------------------------------------
+
 
 class UptimeKumaRetry:
     """Uptime Kuma API wrapper with retry functionality."""
@@ -241,7 +262,7 @@ class UptimeKumaRetry:
         max_retries: int = 5,
         initial_delay: float = 1.0,
         max_delay: float = 30.0,
-        backoff_factor: float = 2.0
+        backoff_factor: float = 2.0,
     ):
         self.url = url
         self.username = username
@@ -276,17 +297,23 @@ class UptimeKumaRetry:
             except Exception as e:
                 retry_count += 1
                 if retry_count == self.max_retries:
-                    log.error(f"Failed to connect to Uptime Kuma after {self.max_retries} attempts. Last error: {str(e)}")
+                    log.error(
+                        f"Failed to connect to Uptime Kuma after {self.max_retries} attempts. Last error: {str(e)}"
+                    )
                     raise
 
-                log.warning(f"Uptime Kuma connection attempt {retry_count} failed: {str(e)}")
+                log.warning(
+                    f"Uptime Kuma connection attempt {retry_count} failed: {str(e)}"
+                )
                 log.info(f"Retrying in {delay} seconds...")
                 time.sleep(delay)
                 delay = min(delay * self.backoff_factor, self.max_delay)
 
         raise RuntimeError("Maximum connection retries exceeded")
 
-    def retry_operation(self, operation: Callable[..., T], *args: object, **kwargs: object) -> T:
+    def retry_operation(
+        self, operation: Callable[..., T], *args: object, **kwargs: object
+    ) -> T:
         """Retry an Uptime Kuma API operation with exponential backoff."""
         retry_count = 0
         delay = self.initial_delay
@@ -300,10 +327,14 @@ class UptimeKumaRetry:
             except Exception as e:
                 retry_count += 1
                 if retry_count == self.max_retries:
-                    log.error(f"Uptime Kuma operation failed after {self.max_retries} attempts. Last error: {str(e)}")
+                    log.error(
+                        f"Uptime Kuma operation failed after {self.max_retries} attempts. Last error: {str(e)}"
+                    )
                     raise
 
-                log.warning(f"Uptime Kuma operation attempt {retry_count} failed: {str(e)}")
+                log.warning(
+                    f"Uptime Kuma operation attempt {retry_count} failed: {str(e)}"
+                )
                 log.info(f"Retrying in {delay} seconds...")
                 time.sleep(delay)
                 delay = min(delay * self.backoff_factor, self.max_delay)
@@ -329,9 +360,11 @@ class UptimeKumaRetry:
             except Exception:
                 pass
 
+
 # -----------------------------------------------------------------------------
 # Uptime Kuma Maintenance Window Functions
 # -----------------------------------------------------------------------------
+
 
 def create_backup_maintenance_window() -> int | None:
     """Create a maintenance window for the backup process."""
@@ -341,7 +374,9 @@ def create_backup_maintenance_window() -> int | None:
         return None
 
     if UptimeKumaApi is None or pytz is None or MaintenanceStrategy is None:
-        log.warning("Uptime Kuma dependencies not available. Skipping maintenance window creation.")
+        log.warning(
+            "Uptime Kuma dependencies not available. Skipping maintenance window creation."
+        )
         return None
 
     try:
@@ -354,49 +389,71 @@ def create_backup_maintenance_window() -> int | None:
             max_retries=3,
             initial_delay=1.0,
             max_delay=10.0,
-            backoff_factor=2.0
+            backoff_factor=2.0,
         ) as kuma:
             # Get server timezone
-            server_info = cast(ServerInfo, cast(object, kuma.retry_operation(kuma.api.info)))  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
-            server_timezone = pytz.timezone(str(server_info['serverTimezone']))
+            server_info = cast(
+                ServerInfo, cast(object, kuma.retry_operation(kuma.api.info))
+            )  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            server_timezone = pytz.timezone(str(server_info["serverTimezone"]))
             log.info(f"Using server timezone: {server_timezone}")
 
             # Create maintenance window
-            maintenance = cast(MaintenanceResponse, cast(object, kuma.retry_operation(
-                kuma.api.add_maintenance,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
-                title="Server Backup in Progress",
-                description="Automated server backup is currently running. Services may be temporarily unavailable.",
-                strategy=MaintenanceStrategy.MANUAL,
-                active=True,
-                timezoneOption=str(server_timezone)
-            )))
+            maintenance = cast(
+                MaintenanceResponse,
+                cast(
+                    object,
+                    kuma.retry_operation(
+                        kuma.api.add_maintenance,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+                        title="Server Backup in Progress",
+                        description="Automated server backup is currently running. Services may be temporarily unavailable.",
+                        strategy=MaintenanceStrategy.MANUAL,
+                        active=True,
+                        timezoneOption=str(server_timezone),
+                    ),
+                ),
+            )
 
-            maintenance_id = int(maintenance['maintenanceID'])
+            maintenance_id = int(maintenance["maintenanceID"])
             log.info(f"Maintenance window created with ID: {maintenance_id}")
 
             # Add all monitors to maintenance window
-            monitors = cast(MonitorList, cast(object, kuma.retry_operation(kuma.api.get_monitors)))  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
-            monitor_ids: MonitorIdList = [{"id": monitor['id']} for monitor in monitors]
+            monitors = cast(
+                MonitorList, cast(object, kuma.retry_operation(kuma.api.get_monitors))
+            )  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            monitor_ids: MonitorIdList = [{"id": monitor["id"]} for monitor in monitors]
 
             if monitor_ids:
                 log.info(f"Adding {len(monitor_ids)} monitors to maintenance window")
                 _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
                     kuma.api.add_monitor_maintenance,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
                     maintenance_id,
-                    monitor_ids
+                    monitor_ids,
                 )
                 log.info("Monitors added to maintenance window")
 
             # Add status page to maintenance window
-            status_pages = cast(StatusPageList, cast(object, kuma.retry_operation(kuma.api.get_status_pages)))  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
-            status_page = next((page for page in status_pages if page['slug'] == UPTIME_KUMA_STATUS_PAGE_SLUG), None)
+            status_pages = cast(
+                StatusPageList,
+                cast(object, kuma.retry_operation(kuma.api.get_status_pages)),
+            )  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+            status_page = next(
+                (
+                    page
+                    for page in status_pages
+                    if page["slug"] == UPTIME_KUMA_STATUS_PAGE_SLUG
+                ),
+                None,
+            )
 
             if status_page:
-                log.info(f"Adding status page '{UPTIME_KUMA_STATUS_PAGE_SLUG}' to maintenance window")
+                log.info(
+                    f"Adding status page '{UPTIME_KUMA_STATUS_PAGE_SLUG}' to maintenance window"
+                )
                 _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
                     kuma.api.add_status_page_maintenance,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
                     maintenance_id,
-                    [{"id": status_page['id']}]
+                    [{"id": status_page["id"]}],
                 )
                 log.info("Status page added to maintenance window")
             else:
@@ -428,13 +485,17 @@ def remove_backup_maintenance_window() -> None:
         return
 
     if UptimeKumaApi is None:
-        log.warning("Uptime Kuma dependencies not available. Skipping maintenance window removal.")
+        log.warning(
+            "Uptime Kuma dependencies not available. Skipping maintenance window removal."
+        )
         return
 
     try:
         # Read maintenance ID from file
         if not MAINTENANCE_ID_FILE.exists():
-            log.warning("No maintenance ID file found. Maintenance window may not have been created.")
+            log.warning(
+                "No maintenance ID file found. Maintenance window may not have been created."
+            )
             return
 
         with open(MAINTENANCE_ID_FILE, "r") as f:
@@ -449,12 +510,19 @@ def remove_backup_maintenance_window() -> None:
             max_retries=3,
             initial_delay=1.0,
             max_delay=10.0,
-            backoff_factor=2.0
+            backoff_factor=2.0,
         ) as kuma:
             # Delete the maintenance window
-            result = cast(DeleteMaintenanceResponse, cast(object, kuma.retry_operation(
-                kuma.api.delete_maintenance, maintenance_id  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
-            )))
+            result = cast(
+                DeleteMaintenanceResponse,
+                cast(
+                    object,
+                    kuma.retry_operation(
+                        kuma.api.delete_maintenance,
+                        maintenance_id,  # pyright: ignore[reportOptionalMemberAccess, reportUnknownArgumentType, reportAttributeAccessIssue, reportUnknownMemberType]
+                    ),
+                ),
+            )
             log.info(f"Maintenance window deleted. Result: {result}")
 
         # Remove the maintenance ID file
@@ -469,6 +537,7 @@ def remove_backup_maintenance_window() -> None:
     except Exception as e:
         log.error(f"Failed to remove maintenance window: {e}")
         # Don't fail for maintenance window cleanup issues
+
 
 # -----------------------------------------------------------------------------
 # Helper Functions
@@ -673,16 +742,22 @@ def run_rclone_sync(log_file: Path) -> dict[str, str | int]:
                 continue  # Ignore non-JSON lines
 
     # Safely extract values with proper type checking
-    transfers = final_stats.get('transfers', 0)
-    bytes_transferred = final_stats.get('bytes', 0)
+    transfers = final_stats.get("transfers", 0)
+    bytes_transferred = final_stats.get("bytes", 0)
     errors_count = final_stats.get("errors", len(error_lines))
-    checks_count = final_stats.get('checks', 0)
-    total_bytes = final_stats.get('totalBytes', 0)
+    checks_count = final_stats.get("checks", 0)
+    total_bytes = final_stats.get("totalBytes", 0)
 
     # Ensure we have integers for calculations
     transfers = int(transfers) if isinstance(transfers, (int, float)) else 0
-    bytes_transferred = int(bytes_transferred) if isinstance(bytes_transferred, (int, float)) else 0
-    errors_count = int(errors_count) if isinstance(errors_count, (int, float)) else len(error_lines)
+    bytes_transferred = (
+        int(bytes_transferred) if isinstance(bytes_transferred, (int, float)) else 0
+    )
+    errors_count = (
+        int(errors_count)
+        if isinstance(errors_count, (int, float))
+        else len(error_lines)
+    )
     checks_count = int(checks_count) if isinstance(checks_count, (int, float)) else 0
     total_bytes = int(total_bytes) if isinstance(total_bytes, (int, float)) else 0
 
@@ -720,7 +795,9 @@ def pre_flight_checks() -> None:
 
     deps = ["tar", "openssl"]
     if BACKUP_COMPRESSION_TOOL not in ["gzip", "pigz"]:
-        log.critical(f"Invalid BACKUP_COMPRESSION_TOOL: {BACKUP_COMPRESSION_TOOL}. Must be 'gzip' or 'pigz'.")
+        log.critical(
+            f"Invalid BACKUP_COMPRESSION_TOOL: {BACKUP_COMPRESSION_TOOL}. Must be 'gzip' or 'pigz'."
+        )
         sys.exit(1)
     deps.append(BACKUP_COMPRESSION_TOOL)
 
@@ -732,7 +809,9 @@ def pre_flight_checks() -> None:
         if not shutil.which(dep):
             log.critical(f"Missing required dependency: {dep}")
             if dep == "pigz":
-                log.critical("You can usually install it with: sudo apt-get install pigz")
+                log.critical(
+                    "You can usually install it with: sudo apt-get install pigz"
+                )
             sys.exit(1)
     try:
         _ = pwd.getpwnam(BACKUP_USER)
@@ -836,7 +915,9 @@ def create_backup(backup_file: Path) -> bool:
             plex_name = PLEX_DATA_DIR.name
             _ = subprocess.run(
                 ["tar", "-cf", str(temp_tar_file), "-C", str(plex_parent), plex_name],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
 
         # Append other directories to the tarball
@@ -865,7 +946,8 @@ def create_backup(backup_file: Path) -> bool:
                 # pv progress goes to stderr by default. The script's logging captures stderr.
                 pv_proc = subprocess.Popen(
                     ["pv", "-N", "Compressing/Encrypting", "-s", str(file_size)],
-                    stdin=tar_in, stdout=subprocess.PIPE
+                    stdin=tar_in,
+                    stdout=subprocess.PIPE,
                 )
                 procs.append(pv_proc)
                 last_proc_stdout = pv_proc.stdout
@@ -876,7 +958,8 @@ def create_backup(backup_file: Path) -> bool:
             # Add compression to the pipeline
             compress_proc = subprocess.Popen(
                 [BACKUP_COMPRESSION_TOOL, f"-{BACKUP_COMPRESSION_LEVEL}"],
-                stdin=last_proc_stdout, stdout=subprocess.PIPE
+                stdin=last_proc_stdout,
+                stdout=subprocess.PIPE,
             )
             if len(procs) > 0 and procs[-1].stdout:
                 procs[-1].stdout.close()
@@ -886,10 +969,17 @@ def create_backup(backup_file: Path) -> bool:
             # Add encryption as the final stage of the pipeline
             encrypt_proc = subprocess.Popen(
                 [
-                    "openssl", "enc", "-aes-256-cbc", "-md", "sha256",
-                    "-pass", f"file:{BACKUP_PASSWORD_FILE.resolve()}", "-pbkdf2",
+                    "openssl",
+                    "enc",
+                    "-aes-256-cbc",
+                    "-md",
+                    "sha256",
+                    "-pass",
+                    f"file:{BACKUP_PASSWORD_FILE.resolve()}",
+                    "-pbkdf2",
                 ],
-                stdin=last_proc_stdout, stdout=final_out
+                stdin=last_proc_stdout,
+                stdout=final_out,
             )
             if len(procs) > 0 and procs[-1].stdout:
                 procs[-1].stdout.close()
@@ -954,10 +1044,14 @@ def verify_backup(backup_file: Path) -> bool:
                 stdout=subprocess.PIPE,
             )
             compress_proc = subprocess.Popen(
-                [BACKUP_COMPRESSION_TOOL, "-d"], stdin=openssl_proc.stdout, stdout=subprocess.PIPE
+                [BACKUP_COMPRESSION_TOOL, "-d"],
+                stdin=openssl_proc.stdout,
+                stdout=subprocess.PIPE,
             )
             tar_proc = subprocess.Popen(
-                ["tar", "-tf", "-"], stdin=compress_proc.stdout, stdout=subprocess.DEVNULL
+                ["tar", "-tf", "-"],
+                stdin=compress_proc.stdout,
+                stdout=subprocess.DEVNULL,
             )
             if openssl_proc.stdout:
                 openssl_proc.stdout.close()
@@ -1078,7 +1172,9 @@ def main() -> None:
                 privatebin_link = upload_log_to_privatebin(log_file)
                 if rclone_summary["status"] == "success":
                     # Format success message with new structure
-                    success_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    success_timestamp = datetime.datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
                     message = (
                         f"**Status Details**\n"
                         f"✅ Sync completed successfully\n"
@@ -1088,7 +1184,7 @@ def main() -> None:
                         f"🔍 Checks: {rclone_summary['checks_count']} / {rclone_summary['total_checks']}\n"
                     )
                     if privatebin_link:
-                        message += f"🔗 View Logs\n\n"
+                        message += "🔗 View Logs\n\n"
                     else:
                         message += "\n"
 
