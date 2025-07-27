@@ -45,6 +45,7 @@ SOURCE="/path/to/local/source"          # Local source directory
 DEST="remote:path/to/destination"       # rclone remote destination
 BANDWIDTH_LIMIT="10M"                   # Bandwidth limit, e.g. "10M" or "off"
 ENABLE_PRIVATEBIN_UPLOAD="false"        # Set "true" to enable PrivateBin
+PRIVATEBIN_PASSWORD=""                  # Password for PrivateBin (leave empty for no password)
 RCLONE_DRY_RUN="false"                  # Set to "true" to enable dry-run mode
 
 ### Filter Configuration Section ##############################################
@@ -345,7 +346,11 @@ fi
 
 # Optionally upload logs to PrivateBin
 if [ "$ENABLE_PRIVATEBIN_UPLOAD" = "true" ]; then
-    PRIVATEBIN_LINK=$(cat "$LOG_FILE" | privatebin create)
+    if [ -n "$PRIVATEBIN_PASSWORD" ]; then
+        PRIVATEBIN_LINK=$(cat "$LOG_FILE" | privatebin create --password "$PRIVATEBIN_PASSWORD")
+    else
+        PRIVATEBIN_LINK=$(cat "$LOG_FILE" | privatebin create)
+    fi
     PRIVATEBIN_MARKDOWN="[View Logs]($PRIVATEBIN_LINK)"
     status_message="$status_message
 🔗 $PRIVATEBIN_MARKDOWN"
@@ -363,4 +368,3 @@ fi
 log_message "Operation completed"
 
 exit $EXIT_STATUS
-
