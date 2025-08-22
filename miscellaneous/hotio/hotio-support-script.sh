@@ -83,15 +83,26 @@ gum_map_arch() { case "$ARCH_RAW" in x86_64|amd64) echo x86_64;; aarch64|arm64) 
 gum_map_os() { case "$OS" in Linux) echo Linux;; Darwin) echo Darwin;; *) echo "$OS";; esac }
 
 # ---------------------- downloads ----------------------
-# Scrape GitHub latest release page for an asset matching a pattern (best effort)
+# Resolve a GitHub release asset matching a pattern. Prefer API, fallback to HTML scraping.
 download_gh_asset_latest() {
   local owner="$1" repo="$2" pattern="$3" out="$4"
+  # Try GitHub API (more stable than HTML scraping)
+  local api="https://api.github.com/repos/${owner}/${repo}/releases/latest"
+  local json="$TMP_DIR/${repo}-latest.json"
+  if retry_curl "$api" "$json"; then
+    local url
+    url=$(grep -Eo '"browser_download_url": *"[^"]+"' "$json" | cut -d '"' -f4 | grep -E "$pattern" | head -n1 || true)
+    if [[ -n "$url" ]]; then
+      if retry_curl "$url" "$out"; then return 0; fi
+    fi
+  fi
+  # Fallback: scrape releases page HTML
   local base="https://github.com/${owner}/${repo}/releases/latest"
   local page="$TMP_DIR/${repo}-latest.html"
   if ! retry_curl "$base" "$page"; then return 1; fi
   # Find first matching href to an asset
   local rel_url
-  rel_url=$(grep -oE "/${owner}/${repo}/releases/download/[^"]*${pattern}[^"]*" "$page" | head -n1 || true)
+  rel_url=$(grep -oE "/${owner}/${repo}/releases/download/[^\" ]*${pattern}[^\" ]*" "$page" | head -n1 || true)
   [[ -z "$rel_url" ]] && return 1
   retry_curl "https://github.com${rel_url}" "$out"
 }
@@ -106,21 +117,34 @@ extract_if_archive() {
 }
 
 ensure_gum() {
+  # Allow caller to provide a preinstalled gum path
+  if [[ -n "${GUM_BIN:-}" && -x "$GUM_BIN" ]]; then return 0; fi
   if have gum; then GUM_BIN="$(command -v gum)"; return 0; fi
   local os arch; os=$(gum_map_os); arch=$(gum_map_arch)
   # Gum assets look like: gum_0.16.2_Linux_x86_64.tar.gz (version varies)
   local pattern="gum_.*_${os}_${arch}\.tar\.gz"
   local arc="$TMP_DIR/gum.tgz"; local ext="$TMP_DIR/gum"
+  log "Attempting to fetch gum for ${os}/${arch} from GitHub releases..."
   if download_gh_asset_latest charmbracelet gum "$pattern" "$arc"; then
     if extract_if_archive "$arc" "$ext"; then
       # find gum binary
       local cand
-      cand=$(find "$ext" -type f -name gum -perm -u+x -print -quit 2>/dev/null || true)
-      if [[ -n "$cand" ]]; then GUM_BIN="$cand"; return 0; fi
+      cand=$(find "$ext" -type f -name gum -print -quit 2>/dev/null || true)
+      if [[ -n "$cand" ]]; then
+        chmod +x "$cand" 2>/dev/null || true
+        if [[ -x "$cand" ]]; then GUM_BIN="$cand"; log "gum ready: $GUM_BIN"; return 0; fi
+      fi
+      log "Downloaded gum archive but could not locate executable inside (pattern: $pattern)."
+    else
+      chmod +x "$arc" 2>/dev/null || true
+      if file "$arc" | grep -qiE 'executable|Mach-O|ELF'; then GUM_BIN="$arc"; log "gum ready: $GUM_BIN"; return 0; fi
+      log "Failed to extract gum archive. 'tar' may be missing or the archive format changed."
     fi
+  else
+    log "Failed to download gum from GitHub releases (pattern: $pattern)."
   fi
-  # No brittle direct URL fallback; silently continue without gum
-  log "gum not available; continuing with basic prompts."
+  # Provide actionable guidance and fall back to basic prompts
+  log "$(color yellow "gum could not be prepared. Falling back to basic prompts.\n - OS/arch detected: ${os}/${arch}\n - If you already have gum installed, re-run with GUM_BIN=/path/to/gum before the command.\n - Or install gum from: https://github.com/charmbracelet/gum/releases")"
 }
 
 ensure_privatebin() {
