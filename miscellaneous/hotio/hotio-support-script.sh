@@ -65,7 +65,7 @@ spinner_run() { # spinner_run "msg" -- command args...
 retry_curl() { # retry_curl URL OUTFILE
   local url="$1"; local out="$2"; local tries=3; local delay=2; local i
   for ((i=1;i<=tries;i++)); do
-    if curl -4fsSL --connect-timeout 10 --retry 0 "$url" -o "$out"; then return 0; fi
+    if curl -4fsSL --connect-timeout 10 --retry 0 "$url" -o "$out" 2>/dev/null; then return 0; fi
     sleep "$delay"; delay=$((delay*2))
   done
   return 1
@@ -76,8 +76,11 @@ ensure_connectivity() { if ! curl -4fsSL --connect-timeout 5 https://logs.notifi
   fi
 }
 
-map_arch() { case "$ARCH_RAW" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; armv7*|armhf) echo armv7;; *) echo "$ARCH_RAW";; esac }
+map_arch() { case "$ARCH_RAW" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; i386|i686) echo i386;; armv7*|armhf) echo armv7;; *) echo "$ARCH_RAW";; esac }
 map_os() { case "$OS" in Linux) echo linux;; Darwin) echo darwin;; *) echo "$OS";; esac }
+# Gum release asset tokens differ (capitalized OS, different arch token)
+gum_map_arch() { case "$ARCH_RAW" in x86_64|amd64) echo x86_64;; aarch64|arm64) echo arm64;; i386|i686) echo i386;; armv7*|armhf) echo armv7;; *) echo "$ARCH_RAW";; esac }
+gum_map_os() { case "$OS" in Linux) echo Linux;; Darwin) echo Darwin;; *) echo "$OS";; esac }
 
 # ---------------------- downloads ----------------------
 # Scrape GitHub latest release page for an asset matching a pattern (best effort)
@@ -104,10 +107,11 @@ extract_if_archive() {
 
 ensure_gum() {
   if have gum; then GUM_BIN="$(command -v gum)"; return 0; fi
-  local os arch; os=$(map_os); arch=$(map_arch)
-  local guess="gum_${os}_${arch}.tar.gz"
+  local os arch; os=$(gum_map_os); arch=$(gum_map_arch)
+  # Gum assets look like: gum_0.16.2_Linux_x86_64.tar.gz (version varies)
+  local pattern="gum_.*_${os}_${arch}\.tar\.gz"
   local arc="$TMP_DIR/gum.tgz"; local ext="$TMP_DIR/gum"
-  if download_gh_asset_latest charmbracelet gum "$guess" "$arc"; then
+  if download_gh_asset_latest charmbracelet gum "$pattern" "$arc"; then
     if extract_if_archive "$arc" "$ext"; then
       # find gum binary
       local cand
@@ -115,23 +119,19 @@ ensure_gum() {
       if [[ -n "$cand" ]]; then GUM_BIN="$cand"; return 0; fi
     fi
   fi
-  # fallback: try direct latest/download URL
-  local direct="https://github.com/charmbracelet/gum/releases/latest/download/${guess}"
-  if retry_curl "$direct" "$arc" && extract_if_archive "$arc" "$ext"; then
-    local cand
-    cand=$(find "$ext" -type f -name gum -perm -u+x -print -quit 2>/dev/null || true)
-    if [[ -n "$cand" ]]; then GUM_BIN="$cand"; return 0; fi
-  fi
+  # No brittle direct URL fallback; silently continue without gum
   log "gum not available; continuing with basic prompts."
 }
 
 ensure_privatebin() {
   if have privatebin; then PVBIN_BIN="$(command -v privatebin)"; return 0; fi
   local os arch; os=$(map_os); arch=$(map_arch)
-  # Try common goreleaser naming patterns
-  local patterns=("privatebin_${os}_${arch}.tar.gz" "privatebin-${os}-${arch}.tar.gz" "privatebin_${os}_${arch}.zip" "privatebin-${os}-${arch}.zip")
+  # PrivateBin assets look like: privatebin_2.1.0_linux_amd64.tar.gz (version varies)
+  # Try tar.gz then zip
+  local pattern_tgz="privatebin_.*_${os}_${arch}\.tar\.gz"
+  local pattern_zip="privatebin_.*_${os}_${arch}\.zip"
   local arc ext cand
-  for p in "${patterns[@]}"; do
+  for p in "$pattern_tgz" "$pattern_zip"; do
     arc="$TMP_DIR/privatebin_asset"
     if download_gh_asset_latest gearnode privatebin "$p" "$arc"; then
       ext="$TMP_DIR/pv"
@@ -145,10 +145,7 @@ ensure_privatebin() {
       fi
     fi
   done
-  # Fallback: try downloading repo root binary (macOS builds often present)
-  local raw_url="https://raw.githubusercontent.com/gearnode/privatebin/master/privatebin"
-  arc="$TMP_DIR/privatebin"
-  if retry_curl "$raw_url" "$arc"; then chmod +x "$arc" 2>/dev/null || true; PVBIN_BIN="$arc"; return 0; fi
+  # No brittle raw URL fallback
   log "privatebin CLI not available; will offer manual copy instead of auto-upload."
 }
 
