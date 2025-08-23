@@ -366,17 +366,17 @@ main() {
   if confirm "Upload logs and compose to logs.notifiarr.com (1-year expiration)?"; then do_upload=true; fi
 
   # PrivateBin config (auto)
-  echo '{"bin":[{"name":"hotio-support","host":"https://logs.notifiarr.com","expire":"1year"}]}' > "$PRIVATEBIN_CFG"
+  echo '{"bin":[{"name":"","host":"https://logs.notifiarr.com","expire":"1year"}]}' > "$PRIVATEBIN_CFG"
 
   local logs_url="" comp_url=""
   if $do_upload && [[ -n "$PVBIN_BIN" ]]; then
     if [[ -s "$logs_file" ]]; then
-      spinner_run "Uploading logs to PrivateBin" -- bash -c "$PVBIN_BIN --config \"$PRIVATEBIN_CFG\" create --expire 1year --formatter plaintext < \"$logs_file\" > \"$TMP_DIR/logs.up\" 2>/dev/null || true"
-      logs_url="$(grep -Eo 'https?://[^ ]+' "$TMP_DIR/logs.up" | tail -n1 || true)"
+      spinner_run "Uploading logs to PrivateBin" -- bash -c "$PVBIN_BIN --config \"$PRIVATEBIN_CFG\" create --expire 1year --formatter plaintext -o json < \"$logs_file\" > \"$TMP_DIR/logs.up\" 2>/dev/null || true"
+      logs_url="$(grep -Eo 'https?://[^"]+' "$TMP_DIR/logs.up" | tail -n1 || true)"
     fi
     if [[ -s "$comp_file" ]]; then
-      spinner_run "Uploading compose to PrivateBin" -- bash -c "$PVBIN_BIN --config \"$PRIVATEBIN_CFG\" create --expire 1year --formatter plaintext < \"$comp_file\" > \"$TMP_DIR/compose.up\" 2>/dev/null || true"
-      comp_url="$(grep -Eo 'https?://[^ ]+' "$TMP_DIR/compose.up" | tail -n1 || true)"
+      spinner_run "Uploading compose to PrivateBin" -- bash -c "$PVBIN_BIN --config \"$PRIVATEBIN_CFG\" create --expire 1year --formatter plaintext -o json < \"$comp_file\" > \"$TMP_DIR/compose.up\" 2>/dev/null || true"
+      comp_url="$(grep -Eo 'https?://[^"]+' "$TMP_DIR/compose.up" | tail -n1 || true)"
     fi
   elif $do_upload; then
     log "Skipping upload: privatebin CLI unavailable."
