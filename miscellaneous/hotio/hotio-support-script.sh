@@ -358,6 +358,66 @@ choose_one() { # choose_one "Prompt" option1 option2 ...
   fi
 }
 
+# Welcome Screen #1: Pre-execution
+show_pre_execution_welcome() {
+  clear_screen
+  local repo_url="https://github.com/engels74/arrsenal-of-scripts/blob/main/miscellaneous/hotio/hotio-support-script.sh"
+  ui_out "$(color magenta "══════════════════════════════════════════════════════════════")"
+  ui_out "$(color magenta "  Hotio Support Helper — Guided Collection & Safe Uploads  ")"
+  ui_out "$(color magenta "══════════════════════════════════════════════════════════════")"
+  ui_out ""
+  ui_out "$(color cyan "What this will do:")"
+  ui_out " - Help you choose a Docker container"
+  ui_out " - Collect the last 24h of logs and a docker-autocompose snapshot"
+  ui_out " - Upload them to logs.notifiarr.com (expires in 1 year)"
+  ui_out ""
+  ui_out "$(color cyan "Downloads (temporary, removed on exit):")"
+  ui_out " - gum (for nicer prompts) — fetched only if not found"
+  ui_out " - privatebin CLI — fetched only if not found"
+  ui_out " - All stored under: $TMP_DIR"
+  ui_out ""
+  ui_out "$(color yellow "Security:") Review the source here: $repo_url"
+  ui_out "No persistent installs. Temporary files are cleaned up automatically."
+  ui_out ""
+  if ! confirm "Continue?"; then
+    log "Aborted by user before any network/download operations."
+    exit 0
+  fi
+}
+
+# Welcome Screen #2: Main menu welcome (after dependencies ready)
+show_main_menu_welcome() {
+  clear_screen
+  if [[ -n "$GUM_BIN" ]]; then
+    gum_run style \
+      --border double --margin "1 2" --padding "1 3" \
+      --foreground "212" --background "236" \
+      "Hotio Support Helper" \
+      "" \
+      "Create a complete, Discord-ready support post in minutes." \
+      "We'll gather logs and an auto-compose snapshot and (optionally)" \
+      "upload them securely to logs.notifiarr.com." >/dev/tty
+
+    local sel
+    sel=$(gum_run choose --limit 1 --height 3 --header "Start now?" -- "Begin" "Exit") || { log "Cancelled."; exit 1; }
+    if [[ "$sel" == "Exit" ]]; then
+      log "Goodbye!"
+      exit 0
+    fi
+  else
+    ui_out "$(color cyan "Welcome to Hotio Support Helper")"
+    ui_out "Create a complete, Discord-ready support post in minutes."
+    ui_out ""
+    local sel
+    sel=$(choose_one "Choose an option:" "Begin" "Exit") || { log "Cancelled."; exit 1; }
+    if [[ "$sel" == "Exit" ]]; then
+      log "Goodbye!"
+      exit 0
+    fi
+  fi
+}
+
+
 
 # ---------------------- upload helpers ----------------------
 privatebin_upload_file() { # privatebin_upload_file <file> -> URL (printed)
@@ -374,11 +434,13 @@ privatebin_upload_file() { # privatebin_upload_file <file> -> URL (printed)
 # ---------------------- main flow ----------------------
 main() {
   clear_screen
+  show_pre_execution_welcome
   log "Welcome! This will help you craft a complete Hotio support request."
   ensure_connectivity
   spinner_run "Preparing interactive tools (gum)" -- bash -c 'true'; ensure_gum || true
   spinner_run "Preparing uploader (privatebin)" -- bash -c 'true'; ensure_privatebin || true
   verify_privatebin_version || true
+  show_main_menu_welcome
 
   # Dry-run option for quick local testing (skips network and uploads)
   if [[ "${1:-}" == "--dry-run" ]]; then
