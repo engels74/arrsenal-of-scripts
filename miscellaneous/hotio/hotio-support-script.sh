@@ -40,7 +40,7 @@ cleanup() {
   rm -rf "$TMP_DIR" 2>/dev/null || true
   exit $code
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT TERM
 
 # ---------------------- utils ----------------------
 color() { case "${1:-}" in red) echo -e "\033[31m${2}\033[0m";; green) echo -e "\033[32m${2}\033[0m";; yellow) echo -e "\033[33m${2}\033[0m";; blue) echo -e "\033[34m${2}\033[0m";; magenta) echo -e "\033[35m${2}\033[0m";; cyan) echo -e "\033[36m${2}\033[0m";; *) echo -e "$2";; esac }
@@ -191,23 +191,45 @@ ensure_privatebin() {
 clear_screen() { command -v clear >/dev/null && clear || printf "\n\n"; }
 
 choose_container() {
-  local name=""; local all
+  local name="" all rc
   if ! have docker; then die "Docker not found. Please install Docker and ensure the daemon is running."; fi
   if ! docker info >/dev/null 2>&1; then die "Docker daemon not running or not accessible for current user."; fi
-  mapfile -t all < <(docker ps -a --format '{{.Names}}' | sort)
-  if [[ ${#all[@]} -eq 0 ]]; then die "No containers found on this host."; fi
-  if [[ -n "$GUM_BIN" ]]; then
-    name=$(gum_run choose --limit 1 --height 15 --header "Select your container" -- "${all[@]}") || true
-  fi
-  if [[ -z "$name" ]]; then
-    echo "Available containers:"; printf " - %s\n" "${all[@]}"
-    read -r -p "Enter container name: " name
-  fi
-  if ! docker ps -a --format '{{.Names}}' | grep -Fxq "$name"; then
+
+  # Keep prompting until we get a valid container or the user cancels
+  while true; do
+    mapfile -t all < <(docker ps -a --format '{{.Names}}' | sort -u)
+    if [[ ${#all[@]} -eq 0 ]]; then die "No containers found on this host."; fi
+
+    if [[ -n "$GUM_BIN" ]]; then
+      name=""
+      if ! name=$(gum_run choose --limit 1 --height 15 --header "Select your container" -- "${all[@]}"); then
+        rc=$?
+        if (( rc == 130 )); then
+          log "Cancelled by user (Ctrl+C). Exiting."
+          exit 130
+        else
+          log "Selection cancelled. Exiting."
+          exit 1
+        fi
+      fi
+    else
+      echo "Available containers:"; printf " - %s\n" "${all[@]}"
+      if ! read -r -p "Enter container name (leave blank to cancel): " name </dev/tty; then
+        log "Cancelled by user. Exiting."
+        exit 130
+      fi
+      if [[ -z "$name" ]]; then
+        log "No selection made. Exiting."
+        exit 1
+      fi
+    fi
+
+    if docker ps -a --format '{{.Names}}' | grep -Fxq "$name"; then
+      printf "%s" "$name"
+      return 0
+    fi
     log "Container '$name' not found. Let's try again."
-    choose_container; return
-  fi
-  echo "$name"
+  done
 }
 
 confirm() {
