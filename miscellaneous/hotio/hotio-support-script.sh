@@ -27,7 +27,7 @@ TMP_DIR="$(mktemp -d -t ${SCRIPT_NAME}.XXXXXX)"
 CLEANUP_CMDS=()
 OS="$(uname -s)"
 ARCH_RAW="$(uname -m)"
-DRY_RUN=false
+
 GUM_BIN=""      # path to gum if available
 PVBIN_BIN=""    # path to privatebin if available
 PRIVATEBIN_CFG="/tmp/privatebin-config.json"
@@ -75,7 +75,8 @@ gum_run() {
 
 
 spinner_run() { # spinner_run "msg" -- command args...
-  local msg="$1"; shift; local dash="$1"; shift || true
+  local msg="$1"; shift
+  if [[ "${1:-}" == "--" ]]; then shift; fi
   gum_run spin --spinner line --title "$msg" -- "$@" || die "gum failed during: $msg"
 }
 
@@ -396,7 +397,8 @@ show_step3_overview() {
 privatebin_upload_file() { # privatebin_upload_file <file> -> URL (printed)
   local f="$1"; [[ -s "$f" ]] || return 1
   [[ -z "$PVBIN_BIN" ]] && return 1
-  local out="$TMP_DIR/$(basename "$f").up"
+  local out
+  out="$TMP_DIR/$(basename "$f").up"
   # Prefer configured bin with explicit formatter and expiry
   if ! cat "$f" | "$PVBIN_BIN" --config "$PRIVATEBIN_CFG" create --expire 1year --formatter plaintext >"$out" 2>/dev/null; then
     return 1
