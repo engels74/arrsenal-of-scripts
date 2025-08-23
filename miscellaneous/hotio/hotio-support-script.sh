@@ -378,18 +378,26 @@ show_main_menu_welcome() {
 show_step3_overview() {
   clear_screen
   gum_run style \
-    --border rounded --margin "1 2" --padding "1 2" \
-    --foreground "212" --background "236" \
-    "Step 3: Create your support post" \
+    --border double --margin "1 2" --padding "1 3" \
+    --foreground "117" --border-foreground "117" \
+    --bold \
+    "✨ Step 3: Create Your Support Post" >/dev/tty
+  echo
+  gum_run style \
+    --border rounded --margin "0 2" --padding "1 2" \
+    --foreground "150" --border-foreground "150" \
+    "📋 What we'll collect:" \
     "" \
-    "We'll ask for:" \
-    "  • Title (one line)" \
-    "  • Problem Details (what happened vs expected)" \
-    "  • Optional Error Snippet (we will format it in triple backticks)" \
+    "• Title (one line)" \
+    "• Problem Details (what happened vs expected)" \
+    "• Optional Error Snippet (auto-formatted as code)" \
     "" \
-    "Environment (image, OS/Arch) and Links to logs/compose are auto-generated." \
-    "You won't need to repeat the container name or environment details." >/dev/tty
-  gum_run confirm "Ready to continue?" || { log "Cancelled."; exit 1; }
+    "🔧 Auto-generated for you:" \
+    "• Environment details (image, OS/Arch)" \
+    "• Links to uploaded logs and compose files" \
+    "• Container name prefix" >/dev/tty
+  echo
+  gum_run confirm "Ready to create your post?" || { log "Cancelled."; exit 1; }
 }
 
 
@@ -424,12 +432,27 @@ main() {
   fi
 
   # Step 1: Container
-  log "Step 1/3: Select the Docker container to diagnose"
+  echo
+  gum_run style \
+    --border rounded --margin "1" --padding "0 2" \
+    --foreground "117" --border-foreground "117" \
+    --bold \
+    "🐳 Step 1/3: Select Docker Container" >/dev/tty
+  echo
   local container; container="$(choose_container)"
 
   # Step 2: Collect logs and compose
-  log "Step 2/3: Collecting logs and container compose (read-only)"
-  log "Uploads will happen automatically to logs.notifiarr.com."
+  echo
+  gum_run style \
+    --border rounded --margin "1" --padding "0 2" \
+    --foreground "150" --border-foreground "150" \
+    --bold \
+    "📦 Step 2/3: Collecting Data" \
+    "" \
+    "• Gathering container logs" \
+    "• Generating compose snapshot" \
+    "• Auto-uploading to logs.notifiarr.com" >/dev/tty
+  echo
   local logs_file="$TMP_DIR/${container}_logs.txt"
   local comp_file="$TMP_DIR/${container}_compose.yaml"
 
@@ -437,19 +460,68 @@ main() {
   spinner_run "Generating compose via docker-autocompose" -- bash -c "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro ghcr.io/red5d/docker-autocompose '$container' > '$comp_file' 2>/dev/null || true"
 
   # Step 3: Problem description (interactive)
-  log "Step 3/3: Describe the problem (quick)"
+  echo
+  gum_run style \
+    --border rounded --margin "1" --padding "0 2" \
+    --foreground "216" --border-foreground "216" \
+    --bold \
+    "✍️  Step 3/3: Describe Your Problem" >/dev/tty
   show_step3_overview
   local q_title q_details q_error image_tag
-  q_title="$(input_single "Title (one line). We'll prepend the container name automatically." "" 10)"
-  q_details="$(multiline_input "Problem Details:\n- What you did, what you expected, what actually happened\n- Include short, relevant facts (versions, settings) if needed\nDo:\n- Include key context and recent changes\nDon't:\n- Paste entire logs here (we upload them for you)\n- Include secrets or tokens" 10)"
-  q_error="$(multiline_input "Optional: Paste the most relevant error lines (5–20). We'll format them as code." 0)"
+  
+  # Enhanced styled title prompt
+  gum_run style \
+    --border rounded --margin "1" --padding "1 2" \
+    --foreground "117" --border-foreground "117" \
+    --bold \
+    "📝 Title Guidelines" \
+    "" \
+    "• Keep it concise (one line)" \
+    "• We'll automatically prepend the container name" \
+    "• Focus on the main issue or question" >/dev/tty
+  q_title="$(input_single "Enter your title:" "" 10)"
+  
+  # Enhanced styled problem details prompt
+  gum_run style \
+    --border rounded --margin "1" --padding "1 2" \
+    --foreground "150" --border-foreground "150" \
+    --bold \
+    "🔍 Problem Details Guidelines" \
+    "" \
+    "What to include:" \
+    "• What you did, what you expected, what actually happened" \
+    "• Short, relevant facts (versions, settings) if needed" \
+    "• Key context and recent changes" \
+    "" \
+    "What NOT to include:" \
+    "• Entire logs (we upload them for you)" \
+    "• Secrets or tokens" >/dev/tty
+  q_details="$(multiline_input "Describe your problem in detail:" 10)"
+  
+  # Enhanced styled error snippet prompt
+  gum_run style \
+    --border rounded --margin "1" --padding "1 2" \
+    --foreground "216" --border-foreground "216" \
+    --bold \
+    "⚠️  Error Snippet Guidelines" \
+    "" \
+    "• Paste only the most relevant error lines (5-20 lines)" \
+    "• We'll automatically format them as code blocks" \
+    "• Skip this if no specific errors to highlight" >/dev/tty
+  q_error="$(multiline_input "Optional - paste relevant error lines:" 0)"
   image_tag="$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)"
 
   # Uploads will proceed automatically.
   echo
-  log "Review:"
-  echo " - Logs file: $logs_file ($(file_size_bytes "$logs_file") bytes)"
-  echo " - Compose file: $comp_file ($(file_size_bytes "$comp_file") bytes)"
+  gum_run style \
+    --border rounded --margin "1" --padding "1 2" \
+    --foreground "117" --border-foreground "117" \
+    --bold \
+    "📊 Review Collected Data" \
+    "" \
+    "• Logs file: $(file_size_bytes "$logs_file") bytes" \
+    "• Compose file: $(file_size_bytes "$comp_file") bytes" \
+    "• Ready for secure upload to logs.notifiarr.com" >/dev/tty
   echo
 
   # PrivateBin config (auto)
@@ -471,8 +543,17 @@ main() {
 
   # Final output
   echo
-  log "Your Discord-ready support thread (copy everything between lines):"
-  echo "---------------- 8< ----------------"
+  gum_run style \
+    --border double --margin "1" --padding "1 3" \
+    --foreground "117" --border-foreground "117" \
+    --bold \
+    "🎉 Your Discord-Ready Support Post" \
+    "" \
+    "Copy everything between the scissor lines below:" >/dev/tty
+  echo
+  gum_run style \
+    --foreground "150" --bold \
+    "---------------- ✂️ Copy from here ✂️ ----------------" >/dev/tty
   echo "[${container}] ${q_title}"; echo
   echo "Environment:";
   echo " - Image: ${image_tag:-unknown}"
@@ -485,7 +566,9 @@ main() {
   if [[ -n "$q_error" ]]; then
     echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo
   fi
-  echo "---------------- 8< ----------------"
+  gum_run style \
+    --foreground "150" --bold \
+    "---------------- ✂️ Copy to here ✂️ ----------------" >/dev/tty
 
   # Clipboard (optional)
   if have pbcopy; then
