@@ -205,10 +205,14 @@ confirm() {
 multiline_input() {
   local prompt="$1"; local min_len=${2:-0}; local text=""
   if [[ -n "$GUM_BIN" ]]; then
-    text=$("$GUM_BIN" write --width 80 --height 12 --placeholder "$prompt") || true
+    # Show multi-line guidance above the input; placeholder cannot render newlines
+    printf "%b\n\n" "$prompt"
+    text=$("$GUM_BIN" write --width 80 --height 12 --placeholder "Type here... (Ctrl+D to submit; Ctrl+E to open editor)") || true
   else
-    echo "$prompt"; echo "End input with a single '.' on its own line:"; local line
-    while IFS= read -r line; do [[ "$line" == "." ]] && break; text+="$line\n"; done
+    printf "%b\n" "$prompt"
+    echo "End input with a single '.' on its own line:"
+    local line
+    while IFS= read -r line; do [[ "$line" == "." ]] && break; text+="${line}"$'\n'; done
   fi
   local len=${#text}
   if (( len < min_len )); then
@@ -241,7 +245,6 @@ main() {
   log "Note: You will be asked before uploading anything."
   local logs_file="$TMP_DIR/${container}_logs.txt"
   local comp_file="$TMP_DIR/${container}_compose.yaml"
-  if ! confirm "Proceed to gather logs for '$container'?"; then die "Aborted by user."; fi
 
   spinner_run "Collecting docker logs" -- bash -c "docker logs --timestamps --since=24h '$container' > '$logs_file' 2>&1 || true"
   spinner_run "Generating compose via docker-autocompose" -- bash -c "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro ghcr.io/red5d/docker-autocompose '$container' > '$comp_file' 2>/dev/null || true"
@@ -249,7 +252,7 @@ main() {
   # Step 3: Problem description
   log "Step 3/3: Describe the problem"
   local desc
-  desc="$(multiline_input "Please describe your issue in detail. Suggested prompts:\n- What were you trying to do?\n- What did you expect?\n- What actually happened?\n- When did it start?\n- What have you already tried?" 50)"
+  desc="$(multiline_input "Please describe your issue in detail.\nControls: Press Ctrl+D to submit, Ctrl+E to edit. Minimum 50 characters required.\n\nSuggested prompts:\n- What were you trying to do?\n- What did you expect?\n- What actually happened?\n- When did it start?\n- What have you already tried?" 50)"
 
   # Consent to upload
   echo
