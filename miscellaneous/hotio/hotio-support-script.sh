@@ -172,6 +172,7 @@ ensure_gum() {
 }
 
 ensure_privatebin() {
+  # Respect preinstalled binary first
   if have privatebin; then PVBIN_BIN="$(command -v privatebin)"; return 0; fi
   local os arch; os=$(map_os); arch=$(map_arch)
   # PrivateBin assets look like: privatebin_2.1.0_linux_amd64.tar.gz (version varies)
@@ -185,16 +186,49 @@ ensure_privatebin() {
       ext="$TMP_DIR/pv"
       if extract_if_archive "$arc" "$ext"; then
         cand=$(find "$ext" -type f -name privatebin -perm -u+x -print -quit 2>/dev/null || true)
-        if [[ -n "$cand" ]]; then PVBIN_BIN="$cand"; return 0; fi
+        if [[ -n "$cand" ]]; then PVBIN_BIN="$cand"; break; fi
       else
         # maybe it's a raw binary
         chmod +x "$arc" 2>/dev/null || true
-        if file "$arc" | grep -qiE 'executable|Mach-O|ELF'; then PVBIN_BIN="$arc"; return 0; fi
+        if file "$arc" | grep -qiE 'executable|Mach-O|ELF'; then PVBIN_BIN="$arc"; break; fi
       fi
     fi
   done
-  # No brittle raw URL fallback
-  log "privatebin CLI not available; will offer manual copy instead of auto-upload."
+  if [[ -z "$PVBIN_BIN" ]]; then
+    log "privatebin CLI not available; will offer manual copy instead of auto-upload."
+    return 1
+  fi
+  # Final sanity check
+  if ! "$PVBIN_BIN" -v >/dev/null 2>&1; then
+    log "Downloaded privatebin binary does not execute properly; falling back to manual copy."
+    PVBIN_BIN=""; return 1
+  fi
+  return 0
+}
+
+# Verify privatebin against latest GitHub tag (best-effort)
+verify_privatebin_version() {
+  [[ -z "$PVBIN_BIN" ]] && return 1
+  local full version tag short latest ref_url sha gh_short
+  if ! full=$("$PVBIN_BIN" -v 2>/dev/null); then return 1; fi
+  version=$(echo "$full" | awk '{print $3}')
+  tag="${version%%-*}"
+  short="${version##*-}"
+  latest=$(curl -4fsSL --connect-timeout 10 https://api.github.com/repos/gearnode/privatebin/releases/latest 2>/dev/null | grep '"tag_name"' | awk -F '"' '{print $4}' || true)
+  if [[ -z "$latest" ]]; then return 0; fi
+  if [[ "$tag" != "$latest" ]]; then
+    log "$(color yellow "privatebin tag ($tag) is not the latest ($latest). Consider updating.")"
+    return 0
+  fi
+  ref_url="https://api.github.com/repos/gearnode/privatebin/git/refs/tags/${latest}"
+  sha=$(curl -4fsSL --connect-timeout 10 "$ref_url" 2>/dev/null | grep '"sha"' | head -n1 | awk -F '"' '{print $4}' || true)
+  if [[ -z "$sha" ]]; then return 0; fi
+  gh_short="${sha:0:7}"
+  if [[ "$gh_short" != "$short" ]]; then
+    log "$(color yellow "privatebin commit ($short) differs from tag commit ($gh_short) for $latest.")"
+  else
+    log "privatebin OK: $latest-$gh_short"
+  fi
 }
 
 # ---------------------- UX helpers ----------------------
@@ -277,6 +311,18 @@ multiline_input() {
   printf "%s" "$text"
 }
 
+# ---------------------- upload helpers ----------------------
+privatebin_upload_file() { # privatebin_upload_file <file> -> URL (printed)
+  local f="$1"; [[ -s "$f" ]] || return 1
+  [[ -z "$PVBIN_BIN" ]] && return 1
+  local out="$TMP_DIR/$(basename "$f").up"
+  # Prefer configured bin with explicit formatter and expiry
+  if ! cat "$f" | "$PVBIN_BIN" --config "$PRIVATEBIN_CFG" create --expire 1year --formatter plaintext >"$out" 2>/dev/null; then
+    return 1
+  fi
+  grep -Eo 'https?://[^ ]+' "$out" | tail -n1
+}
+
 # ---------------------- main flow ----------------------
 main() {
   clear_screen
@@ -284,6 +330,7 @@ main() {
   ensure_connectivity
   spinner_run "Preparing interactive tools (gum)" -- bash -c 'true'; ensure_gum || true
   spinner_run "Preparing uploader (privatebin)" -- bash -c 'true'; ensure_privatebin || true
+  verify_privatebin_version || true
 
   # Dry-run option for quick local testing (skips network and uploads)
   if [[ "${1:-}" == "--dry-run" ]]; then
@@ -318,17 +365,17 @@ main() {
   local do_upload=false
   if confirm "Upload logs and compose to logs.notifiarr.com (1-year expiration)?"; then do_upload=true; fi
 
-  # PrivateBin config
+  # PrivateBin config (auto)
   echo '{"bin":[{"name":"hotio-support","host":"https://logs.notifiarr.com","expire":"1year"}]}' > "$PRIVATEBIN_CFG"
 
   local logs_url="" comp_url=""
   if $do_upload && [[ -n "$PVBIN_BIN" ]]; then
     if [[ -s "$logs_file" ]]; then
-      spinner_run "Uploading logs to PrivateBin" -- bash -c "cat '$logs_file' | '$PVBIN_BIN' --config '$PRIVATEBIN_CFG' create --expire 1year --formatter plaintext > '$TMP_DIR/logs.up' 2>/dev/null || true"
+      spinner_run "Uploading logs to PrivateBin" -- bash -c "'$PVBIN_BIN' --config '$PRIVATEBIN_CFG' create --expire 1year --formatter plaintext < '$logs_file' > '$TMP_DIR/logs.up' 2>/dev/null || true"
       logs_url="$(grep -Eo 'https?://[^ ]+' "$TMP_DIR/logs.up" | tail -n1 || true)"
     fi
     if [[ -s "$comp_file" ]]; then
-      spinner_run "Uploading compose to PrivateBin" -- bash -c "cat '$comp_file' | '$PVBIN_BIN' --config '$PRIVATEBIN_CFG' create --expire 1year --formatter plaintext > '$TMP_DIR/compose.up' 2>/dev/null || true"
+      spinner_run "Uploading compose to PrivateBin" -- bash -c "'$PVBIN_BIN' --config '$PRIVATEBIN_CFG' create --expire 1year --formatter plaintext < '$comp_file' > '$TMP_DIR/compose.up' 2>/dev/null || true"
       comp_url="$(grep -Eo 'https?://[^ ]+' "$TMP_DIR/compose.up" | tail -n1 || true)"
     fi
   elif $do_upload; then
