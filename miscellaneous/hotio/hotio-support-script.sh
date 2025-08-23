@@ -86,6 +86,22 @@ spinner_run() { # spinner_run "msg" -- command args...
   fi
 }
 
+# Safe file size helper: prints 0 if file is missing, otherwise bytes
+file_size_bytes() {
+  local f="$1"
+  if [[ -e "$f" ]]; then
+    # Prefer stat for correctness; fall back to wc
+    if [[ "$OS" == "Darwin" ]]; then
+      stat -f%z -- "$f" 2>/dev/null || wc -c <"$f" 2>/dev/null || echo 0
+    else
+      stat -c%s -- "$f" 2>/dev/null || wc -c <"$f" 2>/dev/null || echo 0
+    fi
+  else
+    echo 0
+  fi
+}
+
+
 retry_curl() { # retry_curl URL OUTFILE
   local url="$1"; local out="$2"; local tries=3; local delay=2; local i
   for ((i=1;i<=tries;i++)); do
@@ -493,8 +509,8 @@ main() {
   # Uploads will proceed automatically.
   echo
   log "Review:"
-  echo " - Logs file: $logs_file ($(wc -c <\"$logs_file\" 2>/dev/null || echo 0) bytes)"
-  echo " - Compose file: $comp_file ($(wc -c <\"$comp_file\" 2>/dev/null || echo 0) bytes)"
+  echo " - Logs file: $logs_file ($(file_size_bytes "$logs_file") bytes)"
+  echo " - Compose file: $comp_file ($(file_size_bytes "$comp_file") bytes)"
   echo
 
   # PrivateBin config (auto)
