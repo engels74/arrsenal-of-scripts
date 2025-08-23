@@ -16,7 +16,7 @@
 # Design constraints:
 # - No persistent installs. Downloads tools into a temp dir and cleans up on exit
 # - IPv4-only network calls with retries
-# - Graceful fallback if gum or privatebin CLI are not present
+# - Hard dependency on gum; exit immediately if gum is not available or fails
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -58,9 +58,6 @@ ui_out() {
   fi
 }
 
-gum_or() { # gum_or <gum-subcommand-and-args...> -- <fallback-echo>
-  if [[ -n "$GUM_BIN" ]]; then "$GUM_BIN" "$@"; else shift $(( $# )); fi
-}
 
 # Wrapper to ensure gum reads from the real TTY (important for curl | bash)
 # We only redirect stdin from /dev/tty so stdout can be captured by callers.
@@ -79,11 +76,7 @@ gum_run() {
 
 spinner_run() { # spinner_run "msg" -- command args...
   local msg="$1"; shift; local dash="$1"; shift || true
-  if [[ -n "$GUM_BIN" ]]; then
-    gum_run spin --spinner line --title "$msg" -- "$@"
-  else
-    log "$msg"; "$@"
-  fi
+  gum_run spin --spinner line --title "$msg" -- "$@" || die "gum failed during: $msg"
 }
 
 # Safe file size helper: prints 0 if file is missing, otherwise bytes
@@ -160,14 +153,15 @@ ensure_gum() {
   # Allow caller to provide a preinstalled gum path
   if [[ -n "${GUM_BIN:-}" && -x "$GUM_BIN" ]]; then return 0; fi
   if have gum; then GUM_BIN="$(command -v gum)"; return 0; fi
+
+  # Attempt to download gum to a temporary directory (no persistent install)
   local os arch; os=$(gum_map_os); arch=$(gum_map_arch)
-  # Gum assets look like: gum_0.16.2_Linux_x86_64.tar.gz (version varies)
   local pattern="gum_.*_${os}_${arch}\.tar\.gz"
   local arc="$TMP_DIR/gum.tgz"; local ext="$TMP_DIR/gum"
-  log "Attempting to fetch gum for ${os}/${arch} from GitHub releases..."
+  log "gum not found; attempting to fetch gum for ${os}/${arch} from GitHub releases..."
   if download_gh_asset_latest charmbracelet gum "$pattern" "$arc"; then
     if extract_if_archive "$arc" "$ext"; then
-      # find gum binary
+      # find gum binary in extracted contents
       local cand
       cand=$(find "$ext" -type f -name gum -print -quit 2>/dev/null || true)
       if [[ -n "$cand" ]]; then
@@ -176,6 +170,7 @@ ensure_gum() {
       fi
       log "Downloaded gum archive but could not locate executable inside (pattern: $pattern)."
     else
+      # maybe it's a raw binary
       chmod +x "$arc" 2>/dev/null || true
       if file "$arc" | grep -qiE 'executable|Mach-O|ELF'; then GUM_BIN="$arc"; log "gum ready: $GUM_BIN"; return 0; fi
       log "Failed to extract gum archive. 'tar' may be missing or the archive format changed."
@@ -183,8 +178,9 @@ ensure_gum() {
   else
     log "Failed to download gum from GitHub releases (pattern: $pattern)."
   fi
-  # Provide actionable guidance and fall back to basic prompts
-  log "$(color yellow "gum could not be prepared. Falling back to basic prompts.\n - OS/arch detected: ${os}/${arch}\n - If you already have gum installed, re-run with GUM_BIN=/path/to/gum before the command.\n - Or install gum from: https://github.com/charmbracelet/gum/releases")"
+
+  # Fail fast with guidance
+  die "gum could not be prepared.\n - OS/arch detected: ${os}/${arch}\n - If you already have gum installed, re-run with GUM_BIN=/path/to/gum before the command.\n - Or install gum from: https://github.com/charmbracelet/gum/releases"
 }
 
 ensure_privatebin() {
@@ -260,7 +256,6 @@ choose_container() {
     mapfile -t all < <(docker ps -a --format '{{.Names}}' | sort -u)
     if [[ ${#all[@]} -eq 0 ]]; then die "No containers found on this host."; fi
 
-    if [[ -n "$GUM_BIN" ]]; then
       name=""
       if ! name=$(gum_run choose --limit 1 --height 15 --header "Select your container" -- "${all[@]}"); then
         rc=$?
@@ -272,17 +267,6 @@ choose_container() {
           exit 1
         fi
       fi
-    else
-      echo "Available containers:"; printf " - %s\n" "${all[@]}"
-      if ! read -r -p "Enter container name (leave blank to cancel): " name </dev/tty; then
-        log "Cancelled by user. Exiting."
-        exit 130
-      fi
-      if [[ -z "$name" ]]; then
-        log "No selection made. Exiting."
-        exit 1
-      fi
-    fi
 
     if docker ps -a --format '{{.Names}}' | grep -Fxq "$name"; then
       printf "%s" "$name"
@@ -293,36 +277,22 @@ choose_container() {
 }
 
 confirm() {
-  local prompt="$1"; local ok=""
-  if [[ -n "$GUM_BIN" ]]; then gum_run confirm "$prompt" && return 0 || return 1; fi
-  if [[ -e /dev/tty ]]; then
-    read -r -p "$prompt [y/N]: " ok </dev/tty
-  else
-    read -r -p "$prompt [y/N]: " ok
-  fi
-  [[ "${ok,,}" == y* ]]
+  local prompt="$1"
+  gum_run confirm "$prompt"
 }
 
 multiline_input() {
   local prompt="$1"; local min_len=${2:-0}; local text=""
-  if [[ -n "$GUM_BIN" ]]; then
-    # Show multi-line guidance above the input; placeholder cannot render newlines
-    ui_out "$prompt"; ui_out ""
-    if ! text=$(gum_run write --width 80 --height 12 --placeholder "Type here... (Ctrl+D to submit; Ctrl+E to open editor)"); then
-      local rc=$?
-      if (( rc == 130 )); then
-        ui_out "$(color yellow "Cancelled by user (Ctrl+C). Exiting.")"
-      else
-        ui_out "$(color yellow "Input cancelled (exit $rc). Exiting.")"
-      fi
-      exit $rc
+  # Show multi-line guidance above the input; placeholder cannot render newlines
+  ui_out "$prompt"; ui_out ""
+  if ! text=$(gum_run write --width 80 --height 12 --placeholder "Type here... (Ctrl+D to submit; Ctrl+E to open editor)"); then
+    local rc=$?
+    if (( rc == 130 )); then
+      ui_out "$(color yellow "Cancelled by user (Ctrl+C). Exiting.")"
+    else
+      ui_out "$(color yellow "Input cancelled (exit $rc). Exiting.")"
     fi
-  else
-    ui_out "$prompt"
-    ui_out "End input with a single '.' on its own line:"
-    local line
-    # Read from the real terminal to support curl | bash
-    while IFS= read -r line; do [[ "$line" == "." ]] && break; text+="${line}"$'\n'; done </dev/tty
+    exit $rc
   fi
   local len=${#text}
   if (( len < min_len )); then
@@ -336,15 +306,7 @@ multiline_input() {
 input_single() { # input_single "Prompt" [default] [min_len]
   local prompt="$1"; local def="${2:-}"; local min_len=${3:-0}; local ans=""
   ui_out "$prompt"
-  if [[ -n "$GUM_BIN" ]]; then
-    ans=$(gum_run input --placeholder "$def" --value "$def") || { ui_out "$(color yellow "Input cancelled. Exiting.")"; exit 1; }
-  else
-    if [[ -e /dev/tty ]]; then
-      read -r -p "> " ans </dev/tty || { ui_out "$(color yellow "Input cancelled. Exiting.")"; exit 1; }
-    else
-      read -r -p "> " ans || { ui_out "$(color yellow "Input cancelled. Exiting.")"; exit 1; }
-    fi
-  fi
+  ans=$(gum_run input --placeholder "$def" --value "$def") || { ui_out "$(color yellow "Input cancelled. Exiting.")"; exit 1; }
   [[ -z "$ans" ]] && ans="$def"
   local len=${#ans}
   if (( len < min_len )); then
@@ -358,25 +320,8 @@ input_single() { # input_single "Prompt" [default] [min_len]
 choose_one() { # choose_one "Prompt" option1 option2 ...
   local prompt="$1"; shift; local options=("$@")
   if (( ${#options[@]} == 0 )); then return 1; fi
-  if [[ -n "$GUM_BIN" ]]; then
-    ui_out "$prompt"
-    gum_run choose --limit 1 --height 10 -- "${options[@]}"
-    return $?
-  else
-    ui_out "$prompt"
-    local i; for i in "${!options[@]}"; do ui_out "  $((i+1)). ${options[$i]}"; done
-    local sel=""; while true; do
-      if [[ -e /dev/tty ]]; then
-        read -r -p "Enter number: " sel </dev/tty || return 1
-      else
-        read -r -p "Enter number: " sel || return 1
-      fi
-      if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel>=1 && sel<=${#options[@]} )); then
-        printf "%s" "${options[$((sel-1))]}"; return 0
-      fi
-      ui_out "$(color yellow "Invalid selection. Try again.")"
-    done
-  fi
+  ui_out "$prompt"
+  gum_run choose --limit 1 --height 10 -- "${options[@]}"
 }
 
 # Welcome Screen #1: Pre-execution
@@ -409,32 +354,20 @@ show_pre_execution_welcome() {
 # Welcome Screen #2: Main menu welcome (after dependencies ready)
 show_main_menu_welcome() {
   clear_screen
-  if [[ -n "$GUM_BIN" ]]; then
-    gum_run style \
-      --border double --margin "1 2" --padding "1 3" \
-      --foreground "212" --background "236" \
-      "Hotio Support Helper" \
-      "" \
-      "Create a complete, Discord-ready support post in minutes." \
-      "We'll gather logs and an auto-compose snapshot and automatically" \
-      "upload them securely to logs.notifiarr.com." >/dev/tty
+  gum_run style \
+    --border double --margin "1 2" --padding "1 3" \
+    --foreground "212" --background "236" \
+    "Hotio Support Helper" \
+    "" \
+    "Create a complete, Discord-ready support post in minutes." \
+    "We'll gather logs and an auto-compose snapshot and automatically" \
+    "upload them securely to logs.notifiarr.com." >/dev/tty
 
-    local sel
-    sel=$(gum_run choose --limit 1 --height 3 --header "Start now?" -- "Begin" "Exit") || { log "Cancelled."; exit 1; }
-    if [[ "$sel" == "Exit" ]]; then
-      log "Goodbye!"
-      exit 0
-    fi
-  else
-    ui_out "$(color cyan "Welcome to Hotio Support Helper")"
-    ui_out "Create a complete, Discord-ready support post in minutes."
-    ui_out ""
-    local sel
-    sel=$(choose_one "Choose an option:" "Begin" "Exit") || { log "Cancelled."; exit 1; }
-    if [[ "$sel" == "Exit" ]]; then
-      log "Goodbye!"
-      exit 0
-    fi
+  local sel
+  sel=$(gum_run choose --limit 1 --height 3 --header "Start now?" -- "Begin" "Exit") || { log "Cancelled."; exit 1; }
+  if [[ "$sel" == "Exit" ]]; then
+    log "Goodbye!"
+    exit 0
   fi
 }
 
@@ -443,31 +376,19 @@ show_main_menu_welcome() {
 # Step 3 overview screen shown before collecting inputs
 show_step3_overview() {
   clear_screen
-  if [[ -n "$GUM_BIN" ]]; then
-    gum_run style \
-      --border rounded --margin "1 2" --padding "1 2" \
-      --foreground "212" --background "236" \
-      "Step 3: Create your support post" \
-      "" \
-      "We'll ask for:" \
-      "  • Title (one line)" \
-      "  • Problem Details (what happened vs expected)" \
-      "  • Optional Error Snippet (we will format it in triple backticks)" \
-      "" \
-      "Environment (image, OS/Arch) and Links to logs/compose are auto-generated." \
-      "You won't need to repeat the container name or environment details." >/dev/tty
-    gum_run confirm "Ready to continue?" || { log "Cancelled."; exit 1; }
-  else
-    ui_out "=== Step 3: Create your support post ==="
-    ui_out "We'll ask for:"
-    ui_out " - Title (one line)"
-    ui_out " - Problem Details (what happened vs expected)"
-    ui_out " - Optional Error Snippet (we will format it in triple backticks)"
-    ui_out ""
-    ui_out "Environment (image, OS/Arch) and Links to logs/compose are auto-generated."
-    ui_out "You won't need to repeat the container name or environment details."
-    confirm "Ready to continue?" || { log "Cancelled."; exit 1; }
-  fi
+  gum_run style \
+    --border rounded --margin "1 2" --padding "1 2" \
+    --foreground "212" --background "236" \
+    "Step 3: Create your support post" \
+    "" \
+    "We'll ask for:" \
+    "  • Title (one line)" \
+    "  • Problem Details (what happened vs expected)" \
+    "  • Optional Error Snippet (we will format it in triple backticks)" \
+    "" \
+    "Environment (image, OS/Arch) and Links to logs/compose are auto-generated." \
+    "You won't need to repeat the container name or environment details." >/dev/tty
+  gum_run confirm "Ready to continue?" || { log "Cancelled."; exit 1; }
 }
 
 
@@ -486,10 +407,10 @@ privatebin_upload_file() { # privatebin_upload_file <file> -> URL (printed)
 # ---------------------- main flow ----------------------
 main() {
   clear_screen
+  ensure_gum
   show_pre_execution_welcome
   log "Welcome! This will help you craft a complete Hotio support request."
   ensure_connectivity
-  spinner_run "Preparing interactive tools (gum)" -- bash -c 'true'; ensure_gum || true
   spinner_run "Preparing uploader (privatebin)" -- bash -c 'true'; ensure_privatebin || true
   verify_privatebin_version || true
   show_main_menu_welcome
