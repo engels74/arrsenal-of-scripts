@@ -49,6 +49,15 @@ die() { echo "$(color red "[ERROR]") $*"; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# UI output helper: write interactive messages to the real terminal when possible
+ui_out() {
+  if [[ -e /dev/tty ]]; then
+    printf "%b\n" "$*" >/dev/tty
+  else
+    printf "%b\n" "$*" >&2
+  fi
+}
+
 gum_or() { # gum_or <gum-subcommand-and-args...> -- <fallback-echo>
   if [[ -n "$GUM_BIN" ]]; then "$GUM_BIN" "$@"; else shift $(( $# )); fi
 }
@@ -243,25 +252,26 @@ multiline_input() {
   local prompt="$1"; local min_len=${2:-0}; local text=""
   if [[ -n "$GUM_BIN" ]]; then
     # Show multi-line guidance above the input; placeholder cannot render newlines
-    printf "%b\n\n" "$prompt"
+    ui_out "$prompt"; ui_out ""
     if ! text=$(gum_run write --width 80 --height 12 --placeholder "Type here... (Ctrl+D to submit; Ctrl+E to open editor)"); then
       local rc=$?
       if (( rc == 130 )); then
-        log "Cancelled by user (Ctrl+C). Exiting."
+        ui_out "$(color yellow "Cancelled by user (Ctrl+C). Exiting.")"
       else
-        log "Input cancelled (exit $rc). Exiting."
+        ui_out "$(color yellow "Input cancelled (exit $rc). Exiting.")"
       fi
       exit $rc
     fi
   else
-    printf "%b\n" "$prompt"
-    echo "End input with a single '.' on its own line:"
+    ui_out "$prompt"
+    ui_out "End input with a single '.' on its own line:"
     local line
-    while IFS= read -r line; do [[ "$line" == "." ]] && break; text+="${line}"$'\n'; done
+    # Read from the real terminal to support curl | bash
+    while IFS= read -r line; do [[ "$line" == "." ]] && break; text+="${line}"$'\n'; done </dev/tty
   fi
   local len=${#text}
   if (( len < min_len )); then
-    log "Please provide at least $min_len characters (you entered $len)."
+    ui_out "$(color yellow "Please provide at least $min_len characters (you entered $len).")"
     multiline_input "$prompt" "$min_len"; return
   fi
   printf "%s" "$text"
