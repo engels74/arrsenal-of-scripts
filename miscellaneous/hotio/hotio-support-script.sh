@@ -53,11 +53,12 @@ gum_or() { # gum_or <gum-subcommand-and-args...> -- <fallback-echo>
   if [[ -n "$GUM_BIN" ]]; then "$GUM_BIN" "$@"; else shift $(( $# )); fi
 }
 
-# Wrapper to ensure gum reads/writes to the real TTY (important for curl | bash)
+# Wrapper to ensure gum reads from the real TTY (important for curl | bash)
+# We only redirect stdin from /dev/tty so stdout can be captured by callers.
 gum_run() {
   if [[ -n "$GUM_BIN" ]]; then
     if [[ -e /dev/tty ]]; then
-      "$GUM_BIN" "$@" </dev/tty >/dev/tty 2>/dev/tty
+      "$GUM_BIN" "$@" </dev/tty
     else
       "$GUM_BIN" "$@"
     fi
