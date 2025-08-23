@@ -373,8 +373,8 @@ show_pre_execution_welcome() {
   ui_out ""
   ui_out "$(color cyan "What this will do:")"
   ui_out " - Help you choose a Docker container"
-  ui_out " - Collect the last 24h of logs and a docker-autocompose snapshot"
-  ui_out " - Upload them to logs.notifiarr.com (expires in 1 year)"
+  ui_out " - Collect all available container logs and a docker-autocompose snapshot"
+  ui_out " - Automatically upload them to logs.notifiarr.com (expires in 1 year)"
   ui_out ""
   ui_out "$(color cyan "Downloads (temporary, removed on exit):")"
   ui_out " - gum (for nicer prompts) — fetched only if not found"
@@ -400,7 +400,7 @@ show_main_menu_welcome() {
       "Hotio Support Helper" \
       "" \
       "Create a complete, Discord-ready support post in minutes." \
-      "We'll gather logs and an auto-compose snapshot and (optionally)" \
+      "We'll gather logs and an auto-compose snapshot and automatically" \
       "upload them securely to logs.notifiarr.com." >/dev/tty
 
     local sel
@@ -459,11 +459,11 @@ main() {
 
   # Step 2: Collect logs and compose
   log "Step 2/3: Collecting logs and container compose (read-only)"
-  log "Note: You will be asked before uploading anything."
+  log "Uploads will happen automatically to logs.notifiarr.com."
   local logs_file="$TMP_DIR/${container}_logs.txt"
   local comp_file="$TMP_DIR/${container}_compose.yaml"
 
-  spinner_run "Collecting docker logs" -- bash -c "docker logs --timestamps --since=24h '$container' > '$logs_file' 2>&1 || true"
+  spinner_run "Collecting docker logs" -- bash -c "docker logs --timestamps '$container' > '$logs_file' 2>&1 || true"
   spinner_run "Generating compose via docker-autocompose" -- bash -c "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro ghcr.io/red5d/docker-autocompose '$container' > '$comp_file' 2>/dev/null || true"
 
   # Step 3: Problem description (interactive)
@@ -490,20 +490,18 @@ main() {
   q_context="$(multiline_input "Anything else that might help (network, mounts, special hardware) (optional)." 0)"
   image_tag="$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)"
 
-  # Consent to upload
+  # Uploads will proceed automatically.
   echo
   log "Review:"
-  echo " - Logs file: $logs_file ($(wc -c <"$logs_file" 2>/dev/null || echo 0) bytes)"
-  echo " - Compose file: $comp_file ($(wc -c <"$comp_file" 2>/dev/null || echo 0) bytes)"
+  echo " - Logs file: $logs_file ($(wc -c <\"$logs_file\" 2>/dev/null || echo 0) bytes)"
+  echo " - Compose file: $comp_file ($(wc -c <\"$comp_file\" 2>/dev/null || echo 0) bytes)"
   echo
-  local do_upload=false
-  if confirm "Upload logs and compose to logs.notifiarr.com (1-year expiration)?"; then do_upload=true; fi
 
   # PrivateBin config (auto)
   echo '{"bin":[{"name":"","host":"https://logs.notifiarr.com","expire":"1year"}]}' > "$PRIVATEBIN_CFG"
 
   local logs_url="" comp_url=""
-  if $do_upload && [[ -n "$PVBIN_BIN" ]]; then
+  if [[ -n "$PVBIN_BIN" ]]; then
     if [[ -s "$logs_file" ]]; then
       spinner_run "Uploading logs to PrivateBin" -- bash -c "$PVBIN_BIN --config \"$PRIVATEBIN_CFG\" create --expire 1year --formatter plaintext -o json < \"$logs_file\" > \"$TMP_DIR/logs.up\" 2>/dev/null || true"
       logs_url="$(grep -Eo 'https?://[^"]+' "$TMP_DIR/logs.up" | tail -n1 || true)"
@@ -512,7 +510,7 @@ main() {
       spinner_run "Uploading compose to PrivateBin" -- bash -c "$PVBIN_BIN --config \"$PRIVATEBIN_CFG\" create --expire 1year --formatter plaintext -o json < \"$comp_file\" > \"$TMP_DIR/compose.up\" 2>/dev/null || true"
       comp_url="$(grep -Eo 'https?://[^"]+' "$TMP_DIR/compose.up" | tail -n1 || true)"
     fi
-  elif $do_upload; then
+  else
     log "Skipping upload: privatebin CLI unavailable."
   fi
 
@@ -525,8 +523,8 @@ main() {
   echo " - Image: ${image_tag:-unknown}"
   echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo
   echo "Links:"
-  if [[ -n "$logs_url" ]]; then echo " - Logs: $logs_url"; else echo " - Logs: (not uploaded) -> attach '$logs_file' or upload to https://logs.notifiarr.com"; fi
-  if [[ -n "$comp_url" ]]; then echo " - Compose (auto): $comp_url"; else echo " - Compose: (not uploaded) -> attach '$comp_file' or upload to https://logs.notifiarr.com"; fi
+  if [[ -n "$logs_url" ]]; then echo " - Logs: $logs_url"; else echo " - Logs: (upload unavailable/failed) -> attach '$logs_file' or upload to https://logs.notifiarr.com"; fi
+  if [[ -n "$comp_url" ]]; then echo " - Compose (auto): $comp_url"; else echo " - Compose: (upload unavailable/failed) -> attach '$comp_file' or upload to https://logs.notifiarr.com"; fi
   echo
   echo "Problem:"
   echo " - Details:"; echo "$q_details"; echo
@@ -541,10 +539,10 @@ main() {
 
   # Clipboard (optional)
   if have pbcopy; then
-    { echo "[${container}] ${q_summary}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-"(not uploaded)"}"; echo " - Compose: ${comp_url:-"(not uploaded)"}"; echo; echo "Problem:"; echo " - Details:"; echo "$q_details"; echo; echo " - Started: $q_started"; echo " - Frequency: $q_freq"; echo " - Can Reproduce: $q_repro_yn"; echo; if [[ -n "$q_repro" ]]; then echo "Repro Steps:"; echo "$q_repro"; echo; fi; echo "What I've Tried:"; if [[ -n "$q_attempts" ]]; then echo "$q_attempts"; else echo "N/A"; fi; echo; echo "Error Snippet:"; if [[ -n "$q_error" ]]; then echo "$q_error"; else echo "N/A"; fi; echo; echo "Additional Context:"; if [[ -n "$q_context" ]]; then echo "$q_context"; else echo "N/A"; fi; } | pbcopy
+    { echo "[${container}] ${q_summary}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem:"; echo " - Details:"; echo "$q_details"; echo; echo " - Started: $q_started"; echo " - Frequency: $q_freq"; echo " - Can Reproduce: $q_repro_yn"; echo; if [[ -n "$q_repro" ]]; then echo "Repro Steps:"; echo "$q_repro"; echo; fi; echo "What I've Tried:"; if [[ -n "$q_attempts" ]]; then echo "$q_attempts"; else echo "N/A"; fi; echo; echo "Error Snippet:"; if [[ -n "$q_error" ]]; then echo "$q_error"; else echo "N/A"; fi; echo; echo "Additional Context:"; if [[ -n "$q_context" ]]; then echo "$q_context"; else echo "N/A"; fi; } | pbcopy
     log "Copied to clipboard (pbcopy)."
   elif have xclip; then
-    { echo "[${container}] ${q_summary}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-"(not uploaded)"}"; echo " - Compose: ${comp_url:-"(not uploaded)"}"; echo; echo "Problem:"; echo " - Details:"; echo "$q_details"; echo; echo " - Started: $q_started"; echo " - Frequency: $q_freq"; echo " - Can Reproduce: $q_repro_yn"; echo; if [[ -n "$q_repro" ]]; then echo "Repro Steps:"; echo "$q_repro"; echo; fi; echo "What I've Tried:"; if [[ -n "$q_attempts" ]]; then echo "$q_attempts"; else echo "N/A"; fi; echo; echo "Error Snippet:"; if [[ -n "$q_error" ]]; then echo "$q_error"; else echo "N/A"; fi; echo; echo "Additional Context:"; if [[ -n "$q_context" ]]; then echo "$q_context"; else echo "N/A"; fi; } | xclip -selection clipboard
+    { echo "[${container}] ${q_summary}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem:"; echo " - Details:"; echo "$q_details"; echo; echo " - Started: $q_started"; echo " - Frequency: $q_freq"; echo " - Can Reproduce: $q_repro_yn"; echo; if [[ -n "$q_repro" ]]; then echo "Repro Steps:"; echo "$q_repro"; echo; fi; echo "What I've Tried:"; if [[ -n "$q_attempts" ]]; then echo "$q_attempts"; else echo "N/A"; fi; echo; echo "Error Snippet:"; if [[ -n "$q_error" ]]; then echo "$q_error"; else echo "N/A"; fi; echo; echo "Additional Context:"; if [[ -n "$q_context" ]]; then echo "$q_context"; else echo "N/A"; fi; } | xclip -selection clipboard
     log "Copied to clipboard (xclip)."
   fi
 
