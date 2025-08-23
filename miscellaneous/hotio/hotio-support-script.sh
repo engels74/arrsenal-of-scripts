@@ -440,6 +440,37 @@ show_main_menu_welcome() {
 
 
 
+# Step 3 overview screen shown before collecting inputs
+show_step3_overview() {
+  clear_screen
+  if [[ -n "$GUM_BIN" ]]; then
+    gum_run style \
+      --border rounded --margin "1 2" --padding "1 2" \
+      --foreground "212" --background "236" \
+      "Step 3: Create your support post" \
+      "" \
+      "We'll ask for:" \
+      "  • Title (one line)" \
+      "  • Problem Details (what happened vs expected)" \
+      "  • Optional Error Snippet (we will format it in triple backticks)" \
+      "" \
+      "Environment (image, OS/Arch) and Links to logs/compose are auto-generated." \
+      "You won't need to repeat the container name or environment details." >/dev/tty
+    gum_run confirm "Ready to continue?" || { log "Cancelled."; exit 1; }
+  else
+    ui_out "=== Step 3: Create your support post ==="
+    ui_out "We'll ask for:"
+    ui_out " - Title (one line)"
+    ui_out " - Problem Details (what happened vs expected)"
+    ui_out " - Optional Error Snippet (we will format it in triple backticks)"
+    ui_out ""
+    ui_out "Environment (image, OS/Arch) and Links to logs/compose are auto-generated."
+    ui_out "You won't need to repeat the container name or environment details."
+    confirm "Ready to continue?" || { log "Cancelled."; exit 1; }
+  fi
+}
+
+
 # ---------------------- upload helpers ----------------------
 privatebin_upload_file() { # privatebin_upload_file <file> -> URL (printed)
   local f="$1"; [[ -s "$f" ]] || return 1
@@ -484,26 +515,11 @@ main() {
 
   # Step 3: Problem description (interactive)
   log "Step 3/3: Describe the problem (quick)"
-  local q_summary q_details q_started q_freq q_repro_yn q_repro q_attempts q_error q_context image_tag
-  q_summary="$(input_single "Briefly describe the problem in one line" "" 10)"
-  q_details="$(multiline_input "What happened vs. what you expected (1–2 short sentences)." 10)"
-  local started_sel
-  started_sel="$(choose_one "When did this start?" "Just now" "Today" "Within the last week" "Longer than a week ago" "After updating the image" "After changing configuration" "Other/custom...")" || started_sel="Other/custom..."
-  if [[ "$started_sel" == "Other/custom..." ]]; then
-    q_started="$(input_single "Describe when it started" "" 5)"
-  else
-    q_started="$started_sel"
-  fi
-  q_freq="$(choose_one "How often does it happen?" "Always (100%)" "Often (~50-90%)" "Intermittent (10-50%)" "Rarely (<10%)" "Only once")"
-  q_repro_yn="$(choose_one "Can you trigger it again?" "Yes" "No" "Not sure")"
-  if [[ "$q_repro_yn" == "Yes" ]]; then
-    q_repro="$(multiline_input "If yes, list the minimal steps (optional). One per line." 0)"
-  else
-    q_repro=""
-  fi
-  q_error="$(multiline_input "If there’s a clear error message, paste the key lines (optional)." 0)"
-  q_attempts="$(multiline_input "Anything you've already tried (optional)." 0)"
-  q_context="$(multiline_input "Anything else that might help (network, mounts, special hardware) (optional)." 0)"
+  show_step3_overview
+  local q_title q_details q_error image_tag
+  q_title="$(input_single "Title (one line). We'll prepend the container name automatically." "" 10)"
+  q_details="$(multiline_input "Problem Details:\n- What you did, what you expected, what actually happened\n- Include short, relevant facts (versions, settings) if needed\nDo:\n- Include key context and recent changes\nDon't:\n- Paste entire logs here (we upload them for you)\n- Include secrets or tokens" 10)"
+  q_error="$(multiline_input "Optional: Paste the most relevant error lines (5–20). We'll format them as code." 0)"
   image_tag="$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)"
 
   # Uploads will proceed automatically.
@@ -534,7 +550,7 @@ main() {
   echo
   log "Your Discord-ready support thread (copy everything between lines):"
   echo "---------------- 8< ----------------"
-  echo "[${container}] ${q_summary}"; echo
+  echo "[${container}] ${q_title}"; echo
   echo "Environment:";
   echo " - Image: ${image_tag:-unknown}"
   echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo
@@ -542,23 +558,18 @@ main() {
   if [[ -n "$logs_url" ]]; then echo " - Logs: $logs_url"; else echo " - Logs: (upload unavailable/failed) -> attach '$logs_file' or upload to https://logs.notifiarr.com"; fi
   if [[ -n "$comp_url" ]]; then echo " - Compose (auto): $comp_url"; else echo " - Compose: (upload unavailable/failed) -> attach '$comp_file' or upload to https://logs.notifiarr.com"; fi
   echo
-  echo "Problem:"
-  echo " - Details:"; echo "$q_details"; echo
-  echo " - Started: $q_started"
-  echo " - Frequency: $q_freq"
-  echo " - Can Reproduce: $q_repro_yn"; echo
-  if [[ -n "$q_repro" ]]; then echo "Repro Steps:"; echo "$q_repro"; echo; fi
-  echo "What I've Tried:"; if [[ -n "$q_attempts" ]]; then echo "$q_attempts"; else echo "N/A"; fi; echo
-  echo "Error Snippet:"; if [[ -n "$q_error" ]]; then echo "$q_error"; else echo "N/A"; fi; echo
-  echo "Additional Context:"; if [[ -n "$q_context" ]]; then echo "$q_context"; else echo "N/A"; fi; echo
+  echo "Problem Details:"; echo "$q_details"; echo
+  if [[ -n "$q_error" ]]; then
+    echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo
+  fi
   echo "---------------- 8< ----------------"
 
   # Clipboard (optional)
   if have pbcopy; then
-    { echo "[${container}] ${q_summary}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem:"; echo " - Details:"; echo "$q_details"; echo; echo " - Started: $q_started"; echo " - Frequency: $q_freq"; echo " - Can Reproduce: $q_repro_yn"; echo; if [[ -n "$q_repro" ]]; then echo "Repro Steps:"; echo "$q_repro"; echo; fi; echo "What I've Tried:"; if [[ -n "$q_attempts" ]]; then echo "$q_attempts"; else echo "N/A"; fi; echo; echo "Error Snippet:"; if [[ -n "$q_error" ]]; then echo "$q_error"; else echo "N/A"; fi; echo; echo "Additional Context:"; if [[ -n "$q_context" ]]; then echo "$q_context"; else echo "N/A"; fi; } | pbcopy
+    { echo "[${container}] ${q_title}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem Details:"; echo "$q_details"; echo; if [[ -n "$q_error" ]]; then echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo; fi; } | pbcopy
     log "Copied to clipboard (pbcopy)."
   elif have xclip; then
-    { echo "[${container}] ${q_summary}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem:"; echo " - Details:"; echo "$q_details"; echo; echo " - Started: $q_started"; echo " - Frequency: $q_freq"; echo " - Can Reproduce: $q_repro_yn"; echo; if [[ -n "$q_repro" ]]; then echo "Repro Steps:"; echo "$q_repro"; echo; fi; echo "What I've Tried:"; if [[ -n "$q_attempts" ]]; then echo "$q_attempts"; else echo "N/A"; fi; echo; echo "Error Snippet:"; if [[ -n "$q_error" ]]; then echo "$q_error"; else echo "N/A"; fi; echo; echo "Additional Context:"; if [[ -n "$q_context" ]]; then echo "$q_context"; else echo "N/A"; fi; } | xclip -selection clipboard
+    { echo "[${container}] ${q_title}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem Details:"; echo "$q_details"; echo; if [[ -n "$q_error" ]]; then echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo; fi; } | xclip -selection clipboard
     log "Copied to clipboard (xclip)."
   fi
 
