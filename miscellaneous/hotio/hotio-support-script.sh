@@ -279,7 +279,12 @@ choose_container() {
 confirm() {
   local prompt="$1"; local ok=""
   if [[ -n "$GUM_BIN" ]]; then gum_run confirm "$prompt" && return 0 || return 1; fi
-  read -r -p "$prompt [y/N]: " ok; [[ "${ok,,}" == y* ]]
+  if [[ -e /dev/tty ]]; then
+    read -r -p "$prompt [y/N]: " ok </dev/tty
+  else
+    read -r -p "$prompt [y/N]: " ok
+  fi
+  [[ "${ok,,}" == y* ]]
 }
 
 multiline_input() {
