@@ -53,10 +53,24 @@ gum_or() { # gum_or <gum-subcommand-and-args...> -- <fallback-echo>
   if [[ -n "$GUM_BIN" ]]; then "$GUM_BIN" "$@"; else shift $(( $# )); fi
 }
 
+# Wrapper to ensure gum reads/writes to the real TTY (important for curl | bash)
+gum_run() {
+  if [[ -n "$GUM_BIN" ]]; then
+    if [[ -e /dev/tty ]]; then
+      "$GUM_BIN" "$@" </dev/tty >/dev/tty 2>/dev/tty
+    else
+      "$GUM_BIN" "$@"
+    fi
+  else
+    return 1
+  fi
+}
+
+
 spinner_run() { # spinner_run "msg" -- command args...
   local msg="$1"; shift; local dash="$1"; shift || true
   if [[ -n "$GUM_BIN" ]]; then
-    "$GUM_BIN" spin --spinner line --title "$msg" -- "$@"
+    gum_run spin --spinner line --title "$msg" -- "$@"
   else
     log "$msg"; "$@"
   fi
@@ -183,7 +197,7 @@ choose_container() {
   mapfile -t all < <(docker ps -a --format '{{.Names}}' | sort)
   if [[ ${#all[@]} -eq 0 ]]; then die "No containers found on this host."; fi
   if [[ -n "$GUM_BIN" ]]; then
-    name=$("$GUM_BIN" choose --limit 1 --height 15 --header "Select your container" -- "${all[@]}") || true
+    name=$(gum_run choose --limit 1 --height 15 --header "Select your container" -- "${all[@]}") || true
   fi
   if [[ -z "$name" ]]; then
     echo "Available containers:"; printf " - %s\n" "${all[@]}"
@@ -198,7 +212,7 @@ choose_container() {
 
 confirm() {
   local prompt="$1"; local ok=""
-  if [[ -n "$GUM_BIN" ]]; then "$GUM_BIN" confirm "$prompt" && return 0 || return 1; fi
+  if [[ -n "$GUM_BIN" ]]; then gum_run confirm "$prompt" && return 0 || return 1; fi
   read -r -p "$prompt [y/N]: " ok; [[ "${ok,,}" == y* ]]
 }
 
@@ -207,7 +221,15 @@ multiline_input() {
   if [[ -n "$GUM_BIN" ]]; then
     # Show multi-line guidance above the input; placeholder cannot render newlines
     printf "%b\n\n" "$prompt"
-    text=$("$GUM_BIN" write --width 80 --height 12 --placeholder "Type here... (Ctrl+D to submit; Ctrl+E to open editor)") || true
+    if ! text=$(gum_run write --width 80 --height 12 --placeholder "Type here... (Ctrl+D to submit; Ctrl+E to open editor)"); then
+      local rc=$?
+      if (( rc == 130 )); then
+        log "Cancelled by user (Ctrl+C). Exiting."
+      else
+        log "Input cancelled (exit $rc). Exiting."
+      fi
+      exit $rc
+    fi
   else
     printf "%b\n" "$prompt"
     echo "End input with a single '.' on its own line:"
