@@ -43,18 +43,26 @@ cleanup() {
 trap cleanup EXIT TERM
 
 # ---------------------- utils ----------------------
-color() { case "${1:-}" in red) echo -e "\033[31m${2}\033[0m";; green) echo -e "\033[32m${2}\033[0m";; yellow) echo -e "\033[33m${2}\033[0m";; blue) echo -e "\033[34m${2}\033[0m";; magenta) echo -e "\033[35m${2}\033[0m";; cyan) echo -e "\033[36m${2}\033[0m";; *) echo -e "$2";; esac }
-log() { echo "$(color cyan "[${SCRIPT_NAME}]") $*"; }
-die() { echo "$(color red "[ERROR]") $*"; exit 1; }
+color() { case "${1:-}" in red) printf "\033[31m%s\033[0m" "${2}";; green) printf "\033[32m%s\033[0m" "${2}";; yellow) printf "\033[33m%s\033[0m" "${2}";; blue) printf "\033[34m%s\033[0m" "${2}";; magenta) printf "\033[35m%s\033[0m" "${2}";; cyan) printf "\033[36m%s\033[0m" "${2}";; *) printf "%s" "$2";; esac }
+log() { printf "%s %s\n" "$(color cyan "[${SCRIPT_NAME}]")" "$*"; }
+die() { printf "%s %s\n" "$(color red "[ERROR]")" "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # UI output helper: write interactive messages to the real terminal when possible
 ui_out() {
   if [[ -e /dev/tty ]]; then
-    printf "%b\n" "$*" >/dev/tty
+    printf "%s\n" "$*" >/dev/tty
   else
-    printf "%b\n" "$*" >&2
+    printf "%s\n" "$*" >&2
+  fi
+}
+
+# Reset terminal to clean state - helps prevent escape sequence corruption
+reset_terminal_state() {
+  if [[ -e /dev/tty ]]; then
+    # Reset terminal attributes and cursor
+    printf "\033[0m\033[?25h" >/dev/tty 2>/dev/null || true
   fi
 }
 
@@ -245,7 +253,15 @@ verify_privatebin_version() {
 }
 
 # ---------------------- UX helpers ----------------------
-clear_screen() { command -v clear >/dev/null && clear || printf "\n\n"; }
+clear_screen() { 
+  # Reset terminal state and clear screen cleanly
+  if command -v clear >/dev/null 2>&1; then
+    clear
+  else
+    # Fallback: reset terminal and clear with ANSI sequences
+    printf "\033c\033[3J" 2>/dev/null || printf "\n\n\n\n\n\n\n\n\n\n"
+  fi
+}
 
 choose_container() {
   local name="" all rc
@@ -424,6 +440,7 @@ main() {
   spinner_run "Preparing uploader (privatebin)" -- bash -c 'true'; ensure_privatebin || true
   verify_privatebin_version || true
   show_main_menu_welcome
+  reset_terminal_state
 
   # Dry-run option for quick local testing (skips network and uploads)
   if [[ "${1:-}" == "--dry-run" ]]; then
@@ -442,6 +459,7 @@ main() {
   local container; container="$(choose_container)"
 
   # Step 2: Collect logs and compose
+  reset_terminal_state
   echo
   gum_run style \
     --border rounded --margin "1" --padding "0 2" \
@@ -460,6 +478,7 @@ main() {
   spinner_run "Generating compose via docker-autocompose" -- bash -c "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro ghcr.io/red5d/docker-autocompose '$container' > '$comp_file' 2>/dev/null || true"
 
   # Step 3: Problem description (interactive)
+  reset_terminal_state
   echo
   gum_run style \
     --border rounded --margin "1" --padding "0 2" \
@@ -542,6 +561,7 @@ main() {
   fi
 
   # Final output
+  reset_terminal_state
   echo
   gum_run style \
     --border double --margin "1" --padding "1 3" \
@@ -553,7 +573,7 @@ main() {
   echo
   gum_run style \
     --foreground "150" --bold \
-    "---------------- ✂️ Copy from here ✂️ ----------------" >/dev/tty
+    "---------------- Copy from here ----------------" >/dev/tty
   echo "[${container}] ${q_title}"; echo
   echo "Environment:";
   echo " - Image: ${image_tag:-unknown}"
@@ -568,7 +588,7 @@ main() {
   fi
   gum_run style \
     --foreground "150" --bold \
-    "---------------- ✂️ Copy to here ✂️ ----------------" >/dev/tty
+    "---------------- Copy to here ----------------" >/dev/tty
 
   # Clipboard (optional)
   if have pbcopy; then
