@@ -36,6 +36,7 @@ DISCORD_CHANNEL_URL="https://discord.gg/hotio"
 # ---------------------- cleanup ----------------------
 cleanup() {
   local code=$?
+  cleanup_terminal
   for cmd in "${CLEANUP_CMDS[@]:-}"; do eval "$cmd" || true; done
   rm -rf "$TMP_DIR" 2>/dev/null || true
   exit $code
@@ -51,8 +52,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # UI output helper: write interactive messages to the real terminal when possible
 ui_out() {
-  if [[ -e /dev/tty ]]; then
-    printf "%s\n" "$*" >/dev/tty
+  # Only use TTY if we're in a truly interactive environment
+  if is_interactive_terminal; then
+    printf "%s\n" "$*" >/dev/tty 2>/dev/null || printf "%s\n" "$*" >&2
   else
     printf "%s\n" "$*" >&2
   fi
@@ -60,21 +62,65 @@ ui_out() {
 
 # Reset terminal to clean state - helps prevent escape sequence corruption
 reset_terminal_state() {
-  if [[ -e /dev/tty ]]; then
-    # Reset terminal attributes and cursor
-    printf "\033[0m\033[?25h" >/dev/tty 2>/dev/null || true
+  # Only perform terminal reset in truly interactive environments
+  if is_interactive_terminal; then
+    # Reset terminal attributes and cursor, suppress responses
+    printf "\033[0m\033[?25h\033[?1h\033=" >/dev/tty 2>/dev/null || true
+    # Consume any pending terminal responses
+    read -t 0.1 -N 100 </dev/tty 2>/dev/null || true
+  fi
+}
+
+# Check if we're in a proper interactive terminal environment
+is_interactive_terminal() {
+  [[ -t 0 && -t 1 && -t 2 ]] && [[ -e /dev/tty ]] 2>/dev/null
+}
+
+# Enhanced terminal cleanup to prevent escape sequence leakage  
+cleanup_terminal() {
+  # Only perform terminal cleanup in truly interactive environments
+  if is_interactive_terminal; then
+    # Reset all terminal modes and clear any pending queries
+    printf "\033[0m\033[?25h\033[?1h\033=\033[!p" >/dev/tty 2>/dev/null || true
+    # Flush any pending terminal responses
+    read -t 0.1 -N 1000 </dev/tty 2>/dev/null || true
   fi
 }
 
 
 # Wrapper to ensure gum reads from the real TTY (important for curl | bash)
-# We only redirect stdin from /dev/tty so stdout can be captured by callers.
+# Enhanced to prevent terminal query escape sequences in piped environments
 gum_run() {
   if [[ -n "$GUM_BIN" ]]; then
-    if [[ -e /dev/tty ]]; then
-      "$GUM_BIN" "$@" </dev/tty
+    # Set terminal environment to prevent capability queries
+    local orig_term="${TERM:-}"
+    local orig_colorterm="${COLORTERM:-}"
+    
+    if [[ -e /dev/tty ]] 2>/dev/null; then
+      if is_interactive_terminal; then
+        # Full interactive mode
+        "$GUM_BIN" "$@" </dev/tty
+      else
+        # Piped environment - suppress terminal queries and colors
+        export TERM="dumb"
+        unset COLORTERM
+        "$GUM_BIN" "$@" 2>/dev/null || true
+      fi
     else
-      "$GUM_BIN" "$@"
+      # No TTY available
+      export TERM="dumb"
+      unset COLORTERM
+      "$GUM_BIN" "$@" 2>/dev/null || true
+    fi
+    
+    # Restore terminal settings
+    if [[ -n "$orig_term" ]]; then
+      export TERM="$orig_term"
+    else
+      unset TERM
+    fi
+    if [[ -n "$orig_colorterm" ]]; then
+      export COLORTERM="$orig_colorterm"
     fi
   else
     return 1
@@ -254,13 +300,19 @@ verify_privatebin_version() {
 
 # ---------------------- UX helpers ----------------------
 clear_screen() { 
-  # Reset terminal state and clear screen cleanly
-  if command -v clear >/dev/null 2>&1; then
-    clear
+  # Clean terminal state first
+  cleanup_terminal
+  
+  # Clear screen appropriately for environment
+  if is_interactive_terminal && command -v clear >/dev/null 2>&1; then
+    clear 2>/dev/null || true
   else
-    # Fallback: reset terminal and clear with ANSI sequences
-    printf "\033c\033[3J" 2>/dev/null || printf "\n\n\n\n\n\n\n\n\n\n"
+    # Fallback for non-interactive/piped environments - minimal output
+    printf "\n" 2>/dev/null || true
   fi
+  
+  # Ensure clean state after clearing
+  cleanup_terminal
 }
 
 choose_container() {
@@ -371,14 +423,26 @@ show_pre_execution_welcome() {
 # Welcome Screen #2: Main menu welcome (after dependencies ready)
 show_main_menu_welcome() {
   clear_screen
-  gum_run style \
+  
+  # Output welcome message using safe method
+  if gum_run style \
     --border double --margin "1 2" --padding "1 3" \
     --foreground "212" --background "236" \
     "Hotio Support Helper" \
     "" \
     "Create a complete, Discord-ready support post in minutes." \
     "We'll gather logs and an auto-compose snapshot and automatically" \
-    "upload them securely to logs.notifiarr.com." >/dev/tty
+    "upload them securely to logs.notifiarr.com." 2>/dev/null; then
+    # gum succeeded
+    true
+  else
+    # Fallback display
+    ui_out "$(color magenta "Hotio Support Helper")"
+    ui_out ""
+    ui_out "Create a complete, Discord-ready support post in minutes."
+    ui_out "We'll gather logs and an auto-compose snapshot and automatically"
+    ui_out "upload them securely to logs.notifiarr.com."
+  fi
 
   local sel
   sel=$(gum_run choose --limit 1 --height 3 --header "Start now?" -- "Begin" "Exit") || { log "Cancelled."; exit 1; }
@@ -393,13 +457,20 @@ show_main_menu_welcome() {
 # Step 3 overview screen shown before collecting inputs
 show_step3_overview() {
   clear_screen
-  gum_run style \
+  
+  # Safe display of step 3 header
+  if ! gum_run style \
     --border double --margin "1 2" --padding "1 3" \
     --foreground "117" --border-foreground "117" \
     --bold \
-    "✨ Step 3: Create Your Support Post" >/dev/tty
+    "✨ Step 3: Create Your Support Post" 2>/dev/null; then
+    ui_out "$(color cyan "✨ Step 3: Create Your Support Post")"
+  fi
+  
   echo
-  gum_run style \
+  
+  # Safe display of collection info
+  if ! gum_run style \
     --border rounded --margin "0 2" --padding "1 2" \
     --foreground "150" --border-foreground "150" \
     "📋 What we'll collect:" \
@@ -411,7 +482,19 @@ show_step3_overview() {
     "🔧 Auto-generated for you:" \
     "• Environment details (image, OS/Arch)" \
     "• Links to uploaded logs and compose files" \
-    "• Container name prefix" >/dev/tty
+    "• Container name prefix" 2>/dev/null; then
+    ui_out "$(color yellow "📋 What we'll collect:")"
+    ui_out ""
+    ui_out "• Title (one line)"
+    ui_out "• Problem Details (what happened vs expected)"
+    ui_out "• Optional Error Snippet (auto-formatted as code)"
+    ui_out ""
+    ui_out "$(color cyan "🔧 Auto-generated for you:")"
+    ui_out "• Environment details (image, OS/Arch)"
+    ui_out "• Links to uploaded logs and compose files"
+    ui_out "• Container name prefix"
+  fi
+  
   echo
   gum_run confirm "Ready to create your post?" || { log "Cancelled."; exit 1; }
 }
@@ -440,7 +523,7 @@ main() {
   spinner_run "Preparing uploader (privatebin)" -- bash -c 'true'; ensure_privatebin || true
   verify_privatebin_version || true
   show_main_menu_welcome
-  reset_terminal_state
+  cleanup_terminal
 
   # Dry-run option for quick local testing (skips network and uploads)
   if [[ "${1:-}" == "--dry-run" ]]; then
@@ -450,18 +533,20 @@ main() {
 
   # Step 1: Container
   echo
-  gum_run style \
+  if ! gum_run style \
     --border rounded --margin "1" --padding "0 2" \
     --foreground "117" --border-foreground "117" \
     --bold \
-    "🐳 Step 1/3: Select Docker Container" >/dev/tty
+    "🐳 Step 1/3: Select Docker Container" 2>/dev/null; then
+    ui_out "$(color cyan "🐳 Step 1/3: Select Docker Container")"
+  fi
   echo
   local container; container="$(choose_container)"
 
   # Step 2: Collect logs and compose
-  reset_terminal_state
+  cleanup_terminal
   echo
-  gum_run style \
+  if ! gum_run style \
     --border rounded --margin "1" --padding "0 2" \
     --foreground "150" --border-foreground "150" \
     --bold \
@@ -469,7 +554,13 @@ main() {
     "" \
     "• Gathering container logs" \
     "• Generating compose snapshot" \
-    "• Auto-uploading to logs.notifiarr.com" >/dev/tty
+    "• Auto-uploading to logs.notifiarr.com" 2>/dev/null; then
+    ui_out "$(color yellow "📦 Step 2/3: Collecting Data")"
+    ui_out ""
+    ui_out "• Gathering container logs"
+    ui_out "• Generating compose snapshot"
+    ui_out "• Auto-uploading to logs.notifiarr.com"
+  fi
   echo
   local logs_file="$TMP_DIR/${container}_logs.txt"
   local comp_file="$TMP_DIR/${container}_compose.yaml"
@@ -478,18 +569,20 @@ main() {
   spinner_run "Generating compose via docker-autocompose" -- bash -c "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro ghcr.io/red5d/docker-autocompose '$container' > '$comp_file' 2>/dev/null || true"
 
   # Step 3: Problem description (interactive)
-  reset_terminal_state
+  cleanup_terminal
   echo
-  gum_run style \
+  if ! gum_run style \
     --border rounded --margin "1" --padding "0 2" \
     --foreground "216" --border-foreground "216" \
     --bold \
-    "✍️  Step 3/3: Describe Your Problem" >/dev/tty
+    "✍️  Step 3/3: Describe Your Problem" 2>/dev/null; then
+    ui_out "$(color magenta "✍️ Step 3/3: Describe Your Problem")"
+  fi
   show_step3_overview
   local q_title q_details q_error image_tag
   
   # Enhanced styled title prompt
-  gum_run style \
+  if ! gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "117" --border-foreground "117" \
     --bold \
@@ -497,11 +590,17 @@ main() {
     "" \
     "• Keep it concise (one line)" \
     "• We'll automatically prepend the container name" \
-    "• Focus on the main issue or question" >/dev/tty
+    "• Focus on the main issue or question" 2>/dev/null; then
+    ui_out "$(color cyan "📝 Title Guidelines")"
+    ui_out ""
+    ui_out "• Keep it concise (one line)"
+    ui_out "• We'll automatically prepend the container name"
+    ui_out "• Focus on the main issue or question"
+  fi
   q_title="$(input_single "Enter your title:" "" 10)"
   
   # Enhanced styled problem details prompt
-  gum_run style \
+  if ! gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "150" --border-foreground "150" \
     --bold \
@@ -514,11 +613,22 @@ main() {
     "" \
     "What NOT to include:" \
     "• Entire logs (we upload them for you)" \
-    "• Secrets or tokens" >/dev/tty
+    "• Secrets or tokens" 2>/dev/null; then
+    ui_out "$(color yellow "🔍 Problem Details Guidelines")"
+    ui_out ""
+    ui_out "What to include:"
+    ui_out "• What you did, what you expected, what actually happened"
+    ui_out "• Short, relevant facts (versions, settings) if needed"
+    ui_out "• Key context and recent changes"
+    ui_out ""
+    ui_out "What NOT to include:"
+    ui_out "• Entire logs (we upload them for you)"
+    ui_out "• Secrets or tokens"
+  fi
   q_details="$(multiline_input "Describe your problem in detail:" 10)"
   
   # Enhanced styled error snippet prompt
-  gum_run style \
+  if ! gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "216" --border-foreground "216" \
     --bold \
@@ -526,13 +636,19 @@ main() {
     "" \
     "• Paste only the most relevant error lines (5-20 lines)" \
     "• We'll automatically format them as code blocks" \
-    "• Skip this if no specific errors to highlight" >/dev/tty
+    "• Skip this if no specific errors to highlight" 2>/dev/null; then
+    ui_out "$(color red "⚠️ Error Snippet Guidelines")"
+    ui_out ""
+    ui_out "• Paste only the most relevant error lines (5-20 lines)"
+    ui_out "• We'll automatically format them as code blocks"
+    ui_out "• Skip this if no specific errors to highlight"
+  fi
   q_error="$(multiline_input "Optional - paste relevant error lines:" 0)"
   image_tag="$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)"
 
   # Uploads will proceed automatically.
   echo
-  gum_run style \
+  if ! gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "117" --border-foreground "117" \
     --bold \
@@ -540,7 +656,13 @@ main() {
     "" \
     "• Logs file: $(file_size_bytes "$logs_file") bytes" \
     "• Compose file: $(file_size_bytes "$comp_file") bytes" \
-    "• Ready for secure upload to logs.notifiarr.com" >/dev/tty
+    "• Ready for secure upload to logs.notifiarr.com" 2>/dev/null; then
+    ui_out "$(color cyan "📊 Review Collected Data")"
+    ui_out ""
+    ui_out "• Logs file: $(file_size_bytes "$logs_file") bytes"
+    ui_out "• Compose file: $(file_size_bytes "$comp_file") bytes"
+    ui_out "• Ready for secure upload to logs.notifiarr.com"
+  fi
   echo
 
   # PrivateBin config (auto)
@@ -561,19 +683,25 @@ main() {
   fi
 
   # Final output
-  reset_terminal_state
+  cleanup_terminal
   echo
-  gum_run style \
+  if ! gum_run style \
     --border double --margin "1" --padding "1 3" \
     --foreground "117" --border-foreground "117" \
     --bold \
     "🎉 Your Discord-Ready Support Post" \
     "" \
-    "Copy everything between the scissor lines below:" >/dev/tty
+    "Copy everything between the scissor lines below:" 2>/dev/null; then
+    ui_out "$(color green "🎉 Your Discord-Ready Support Post")"
+    ui_out ""
+    ui_out "Copy everything between the scissor lines below:"
+  fi
   echo
-  gum_run style \
+  if ! gum_run style \
     --foreground "150" --bold \
-    "---------------- Copy from here ----------------" >/dev/tty
+    "---------------- Copy from here ----------------" 2>/dev/null; then
+    ui_out "$(color yellow "---------------- Copy from here ----------------")"
+  fi
   echo "[${container}] ${q_title}"; echo
   echo "Environment:";
   echo " - Image: ${image_tag:-unknown}"
@@ -586,9 +714,11 @@ main() {
   if [[ -n "$q_error" ]]; then
     echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo
   fi
-  gum_run style \
+  if ! gum_run style \
     --foreground "150" --bold \
-    "---------------- Copy to here ----------------" >/dev/tty
+    "---------------- Copy to here ----------------" 2>/dev/null; then
+    ui_out "$(color yellow "---------------- Copy to here ----------------")"
+  fi
 
   # Clipboard (optional)
   if have pbcopy; then
