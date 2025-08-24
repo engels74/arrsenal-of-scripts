@@ -44,29 +44,56 @@ cleanup() {
 trap cleanup EXIT TERM
 
 # ---------------------- utils ----------------------
-color() { case "${1:-}" in red) printf "\033[31m%s\033[0m" "${2}";; green) printf "\033[32m%s\033[0m" "${2}";; yellow) printf "\033[33m%s\033[0m" "${2}";; blue) printf "\033[34m%s\033[0m" "${2}";; magenta) printf "\033[35m%s\033[0m" "${2}";; cyan) printf "\033[36m%s\033[0m" "${2}";; *) printf "%s" "$2";; esac }
-log() { printf "%s %s\n" "$(color cyan "[${SCRIPT_NAME}]")" "$*"; }
-die() { printf "%s %s\n" "$(color red "[ERROR]")" "$*" >&2; exit 1; }
-
-have() { command -v "$1" >/dev/null 2>&1; }
-
-# UI output helper: write interactive messages to the real terminal when possible
-ui_out() {
-  # Only use TTY if we're in a truly interactive environment
-  if is_interactive_terminal; then
-    printf "%s\n" "$*" >/dev/tty 2>/dev/null || printf "%s\n" "$*" >&2
+# Pure gum-based styling functions
+gum_style_color() { 
+  local color="$1"; local text="$2"
+  if [[ -n "$GUM_BIN" ]]; then
+    case "$color" in
+      red) gum_run style --foreground 196 "$text";;
+      green) gum_run style --foreground 46 "$text";;
+      yellow) gum_run style --foreground 226 "$text";;
+      blue) gum_run style --foreground 33 "$text";;
+      magenta) gum_run style --foreground 201 "$text";;
+      cyan) gum_run style --foreground 51 "$text";;
+      *) gum_run style "$text";;
+    esac
   else
-    printf "%s\n" "$*" >&2
+    # Fallback when gum is not available yet (during bootstrap)
+    printf "%s\n" "$text"
   fi
 }
 
-# Reset terminal to clean state - helps prevent escape sequence corruption
+log() { 
+  if [[ -n "$GUM_BIN" ]]; then
+    local prefix
+    prefix=$(gum_run style --foreground 51 "[${SCRIPT_NAME}]")
+    gum_run style "$prefix $*"
+  else
+    # Fallback when gum is not available yet (during bootstrap)
+    printf "[%s] %s\n" "$SCRIPT_NAME" "$*"
+  fi
+}
+
+die() { 
+  if [[ -n "$GUM_BIN" ]]; then
+    local prefix
+    prefix=$(gum_run style --foreground 196 "[ERROR]")
+    gum_run style "$prefix $*" >&2
+  else
+    # Fallback when gum is not available yet (during bootstrap)
+    printf "[ERROR] %s\n" "$*" >&2
+  fi
+  exit 1
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+
+# Reset terminal to clean state - gum-compatible version
 reset_terminal_state() {
-  # Only perform terminal reset in truly interactive environments
+  # Gum handles terminal state internally, minimal cleanup needed
   if is_interactive_terminal; then
-    # Reset terminal attributes and cursor, suppress responses
-    printf "\033[0m\033[?25h\033[?1h\033=" >/dev/tty 2>/dev/null || true
-    # Consume any pending terminal responses
+    # Just consume any pending terminal input
     read -t 0.1 -N 100 </dev/tty 2>/dev/null || true
   fi
 }
@@ -76,51 +103,63 @@ is_interactive_terminal() {
   [[ -t 0 && -t 1 && -t 2 ]] && [[ -e /dev/tty ]] 2>/dev/null
 }
 
-# Enhanced terminal cleanup to prevent escape sequence leakage  
+# Enhanced terminal cleanup - gum-compatible version  
 cleanup_terminal() {
-  # Only perform terminal cleanup in truly interactive environments
+  # Gum-compatible cleanup without escape sequences
   if is_interactive_terminal; then
-    # Reset all terminal modes and clear any pending queries
-    printf "\033[0m\033[?25h\033[?1h\033=\033[!p" >/dev/tty 2>/dev/null || true
-    # Flush any pending terminal responses
+    # Just flush any pending terminal input/responses
     read -t 0.1 -N 1000 </dev/tty 2>/dev/null || true
   fi
 }
 
 
-# Wrapper to ensure gum reads from the real TTY (important for curl | bash)
-# Enhanced to prevent terminal query escape sequences in piped environments
+# Enhanced gum wrapper for reliable operation in all environments (interactive and piped)
+# Optimized for curl | bash scenarios while maintaining full functionality
 gum_run() {
   if [[ -n "$GUM_BIN" ]]; then
-    # Set terminal environment to prevent capability queries
+    # Store original environment
     local orig_term="${TERM:-}"
     local orig_colorterm="${COLORTERM:-}"
+    local orig_no_color="${NO_COLOR:-}"
     
     if [[ -e /dev/tty ]] 2>/dev/null; then
       if is_interactive_terminal; then
-        # Full interactive mode
+        # Full interactive mode with optimal gum environment
+        export GUM_INPUT_CURSOR_FOREGROUND="212"
+        export GUM_INPUT_PROMPT_FOREGROUND="240"
         "$GUM_BIN" "$@" </dev/tty
       else
-        # Piped environment - suppress terminal queries and colors
-        export TERM="dumb"
-        unset COLORTERM
-        "$GUM_BIN" "$@" 2>/dev/null || true
+        # Piped environment - configure for reliable output without capability queries
+        export TERM="${TERM:-xterm-256color}"
+        export COLORTERM="truecolor"
+        export NO_COLOR=""
+        export GUM_INPUT_CURSOR_FOREGROUND="212"
+        export GUM_INPUT_PROMPT_FOREGROUND="240"
+        # Execute gum with proper error handling
+        "$GUM_BIN" "$@" 2>/dev/null
       fi
     else
-      # No TTY available
-      export TERM="dumb"
-      unset COLORTERM
-      "$GUM_BIN" "$@" 2>/dev/null || true
+      # No TTY - minimal configuration for headless environments
+      export TERM="xterm-256color"
+      export NO_COLOR=""
+      "$GUM_BIN" "$@" 2>/dev/null
     fi
     
-    # Restore terminal settings
+    # Restore original environment
     if [[ -n "$orig_term" ]]; then
       export TERM="$orig_term"
     else
-      unset TERM
+      unset TERM 2>/dev/null || true
     fi
     if [[ -n "$orig_colorterm" ]]; then
       export COLORTERM="$orig_colorterm"
+    else
+      unset COLORTERM 2>/dev/null || true
+    fi
+    if [[ -n "$orig_no_color" ]]; then
+      export NO_COLOR="$orig_no_color"
+    else
+      unset NO_COLOR 2>/dev/null || true
     fi
   else
     return 1
@@ -284,7 +323,7 @@ verify_privatebin_version() {
   latest=$(curl -4fsSL --connect-timeout 10 https://api.github.com/repos/gearnode/privatebin/releases/latest 2>/dev/null | grep '"tag_name"' | awk -F '"' '{print $4}' || true)
   if [[ -z "$latest" ]]; then return 0; fi
   if [[ "$tag" != "$latest" ]]; then
-    log "$(color yellow "privatebin tag ($tag) is not the latest ($latest). Consider updating.")"
+    log "$(gum_style_color yellow "privatebin tag ($tag) is not the latest ($latest). Consider updating.")"
     return 0
   fi
   ref_url="https://api.github.com/repos/gearnode/privatebin/git/refs/tags/${latest}"
@@ -292,7 +331,7 @@ verify_privatebin_version() {
   if [[ -z "$sha" ]]; then return 0; fi
   gh_short="${sha:0:7}"
   if [[ "$gh_short" != "$short" ]]; then
-    log "$(color yellow "privatebin commit ($short) differs from tag commit ($gh_short) for $latest.")"
+    log "$(gum_style_color yellow "privatebin commit ($short) differs from tag commit ($gh_short) for $latest.")"
   else
     log "privatebin OK: $latest-$gh_short"
   fi
@@ -353,19 +392,20 @@ confirm() {
 multiline_input() {
   local prompt="$1"; local min_len=${2:-0}; local text=""
   # Show multi-line guidance above the input; placeholder cannot render newlines
-  ui_out "$prompt"; ui_out ""
+  gum_run style "$prompt"
+  echo
   if ! text=$(gum_run write --width 80 --height 12 --placeholder "Type here... (Ctrl+D to submit; Ctrl+E to open editor)"); then
     local rc=$?
     if (( rc == 130 )); then
-      ui_out "$(color yellow "Cancelled by user (Ctrl+C). Exiting.")"
+      gum_style_color yellow "Cancelled by user (Ctrl+C). Exiting."
     else
-      ui_out "$(color yellow "Input cancelled (exit $rc). Exiting.")"
+      gum_style_color yellow "Input cancelled (exit $rc). Exiting."
     fi
     exit $rc
   fi
   local len=${#text}
   if (( len < min_len )); then
-    ui_out "$(color yellow "Please provide at least $min_len characters (you entered $len).")"
+    gum_style_color yellow "Please provide at least $min_len characters (you entered $len)."
     multiline_input "$prompt" "$min_len"; return
   fi
   printf "%s" "$text"
@@ -374,12 +414,12 @@ multiline_input() {
 # Single-line input helper with fallback and min length
 input_single() { # input_single "Prompt" [default] [min_len]
   local prompt="$1"; local def="${2:-}"; local min_len=${3:-0}; local ans=""
-  ui_out "$prompt"
-  ans=$(gum_run input --placeholder "$def" --value "$def") || { ui_out "$(color yellow "Input cancelled. Exiting.")"; exit 1; }
+  gum_run style "$prompt"
+  ans=$(gum_run input --placeholder "$def" --value "$def") || { gum_style_color yellow "Input cancelled. Exiting."; exit 1; }
   [[ -z "$ans" ]] && ans="$def"
   local len=${#ans}
   if (( len < min_len )); then
-    ui_out "$(color yellow "Please provide at least $min_len characters (you entered $len).")"
+    gum_style_color yellow "Please provide at least $min_len characters (you entered $len)."
     input_single "$prompt" "$def" "$min_len"; return
   fi
   printf "%s" "$ans"
@@ -389,7 +429,7 @@ input_single() { # input_single "Prompt" [default] [min_len]
 choose_one() { # choose_one "Prompt" option1 option2 ...
   local prompt="$1"; shift; local options=("$@")
   if (( ${#options[@]} == 0 )); then return 1; fi
-  ui_out "$prompt"
+  gum_run style "$prompt"
   gum_run choose --limit 1 --height 10 -- "${options[@]}"
 }
 
@@ -397,23 +437,24 @@ choose_one() { # choose_one "Prompt" option1 option2 ...
 show_pre_execution_welcome() {
   clear_screen
   local repo_url="https://github.com/engels74/arrsenal-of-scripts/blob/main/miscellaneous/hotio/hotio-support-script.sh"
-  ui_out "$(color magenta "══════════════════════════════════════════════════════════════")"
-  ui_out "$(color magenta "  Hotio Support Helper — Guided Collection & Safe Uploads  ")"
-  ui_out "$(color magenta "══════════════════════════════════════════════════════════════")"
-  ui_out ""
-  ui_out "$(color cyan "What this will do:")"
-  ui_out " - Help you choose a Docker container"
-  ui_out " - Collect all available container logs and a docker-autocompose snapshot"
-  ui_out " - Automatically upload them to logs.notifiarr.com (expires in 1 year)"
-  ui_out ""
-  ui_out "$(color cyan "Downloads (temporary, removed on exit):")"
-  ui_out " - gum (for nicer prompts) — fetched only if not found"
-  ui_out " - privatebin CLI — fetched only if not found"
-  ui_out " - All stored under: $TMP_DIR"
-  ui_out ""
-  ui_out "$(color yellow "Security:") Review the source here: $repo_url"
-  ui_out "No persistent installs. Temporary files are cleaned up automatically."
-  ui_out ""
+  gum_run style \
+    --border double --margin "1 2" --padding "1 3" \
+    --foreground "201" --border-foreground "201" \
+    "Hotio Support Helper — Guided Collection & Safe Uploads" \
+    "" \
+    "What this will do:" \
+    " - Help you choose a Docker container" \
+    " - Collect all available container logs and a docker-autocompose snapshot" \
+    " - Automatically upload them to logs.notifiarr.com (expires in 1 year)" \
+    "" \
+    "Downloads (temporary, removed on exit):" \
+    " - gum (for nicer prompts) — fetched only if not found" \
+    " - privatebin CLI — fetched only if not found" \
+    " - All stored under: $TMP_DIR" \
+    "" \
+    "Security: Review the source here: $repo_url" \
+    "No persistent installs. Temporary files are cleaned up automatically."
+  echo
   if ! confirm "Continue?"; then
     log "Aborted by user before any network/download operations."
     exit 0
@@ -424,25 +465,15 @@ show_pre_execution_welcome() {
 show_main_menu_welcome() {
   clear_screen
   
-  # Output welcome message using safe method
-  if gum_run style \
+  # Output welcome message using gum
+  gum_run style \
     --border double --margin "1 2" --padding "1 3" \
     --foreground "212" --background "236" \
     "Hotio Support Helper" \
     "" \
     "Create a complete, Discord-ready support post in minutes." \
     "We'll gather logs and an auto-compose snapshot and automatically" \
-    "upload them securely to logs.notifiarr.com." 2>/dev/null; then
-    # gum succeeded
-    true
-  else
-    # Fallback display
-    ui_out "$(color magenta "Hotio Support Helper")"
-    ui_out ""
-    ui_out "Create a complete, Discord-ready support post in minutes."
-    ui_out "We'll gather logs and an auto-compose snapshot and automatically"
-    ui_out "upload them securely to logs.notifiarr.com."
-  fi
+    "upload them securely to logs.notifiarr.com."
 
   local sel
   sel=$(gum_run choose --limit 1 --height 3 --header "Start now?" -- "Begin" "Exit") || { log "Cancelled."; exit 1; }
@@ -459,18 +490,16 @@ show_step3_overview() {
   clear_screen
   
   # Safe display of step 3 header
-  if ! gum_run style \
+  gum_run style \
     --border double --margin "1 2" --padding "1 3" \
     --foreground "117" --border-foreground "117" \
     --bold \
-    "✨ Step 3: Create Your Support Post" 2>/dev/null; then
-    ui_out "$(color cyan "✨ Step 3: Create Your Support Post")"
-  fi
+    "✨ Step 3: Create Your Support Post"
   
   echo
   
   # Safe display of collection info
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "0 2" --padding "1 2" \
     --foreground "150" --border-foreground "150" \
     "📋 What we'll collect:" \
@@ -482,18 +511,7 @@ show_step3_overview() {
     "🔧 Auto-generated for you:" \
     "• Environment details (image, OS/Arch)" \
     "• Links to uploaded logs and compose files" \
-    "• Container name prefix" 2>/dev/null; then
-    ui_out "$(color yellow "📋 What we'll collect:")"
-    ui_out ""
-    ui_out "• Title (one line)"
-    ui_out "• Problem Details (what happened vs expected)"
-    ui_out "• Optional Error Snippet (auto-formatted as code)"
-    ui_out ""
-    ui_out "$(color cyan "🔧 Auto-generated for you:")"
-    ui_out "• Environment details (image, OS/Arch)"
-    ui_out "• Links to uploaded logs and compose files"
-    ui_out "• Container name prefix"
-  fi
+    "• Container name prefix"
   
   echo
   gum_run confirm "Ready to create your post?" || { log "Cancelled."; exit 1; }
@@ -533,20 +551,18 @@ main() {
 
   # Step 1: Container
   echo
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "1" --padding "0 2" \
     --foreground "117" --border-foreground "117" \
     --bold \
-    "🐳 Step 1/3: Select Docker Container" 2>/dev/null; then
-    ui_out "$(color cyan "🐳 Step 1/3: Select Docker Container")"
-  fi
+    "🐳 Step 1/3: Select Docker Container"
   echo
   local container; container="$(choose_container)"
 
   # Step 2: Collect logs and compose
   cleanup_terminal
   echo
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "1" --padding "0 2" \
     --foreground "150" --border-foreground "150" \
     --bold \
@@ -554,13 +570,7 @@ main() {
     "" \
     "• Gathering container logs" \
     "• Generating compose snapshot" \
-    "• Auto-uploading to logs.notifiarr.com" 2>/dev/null; then
-    ui_out "$(color yellow "📦 Step 2/3: Collecting Data")"
-    ui_out ""
-    ui_out "• Gathering container logs"
-    ui_out "• Generating compose snapshot"
-    ui_out "• Auto-uploading to logs.notifiarr.com"
-  fi
+    "• Auto-uploading to logs.notifiarr.com"
   echo
   local logs_file="$TMP_DIR/${container}_logs.txt"
   local comp_file="$TMP_DIR/${container}_compose.yaml"
@@ -571,18 +581,16 @@ main() {
   # Step 3: Problem description (interactive)
   cleanup_terminal
   echo
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "1" --padding "0 2" \
     --foreground "216" --border-foreground "216" \
     --bold \
-    "✍️  Step 3/3: Describe Your Problem" 2>/dev/null; then
-    ui_out "$(color magenta "✍️ Step 3/3: Describe Your Problem")"
-  fi
+    "✍️  Step 3/3: Describe Your Problem"
   show_step3_overview
   local q_title q_details q_error image_tag
   
   # Enhanced styled title prompt
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "117" --border-foreground "117" \
     --bold \
@@ -590,17 +598,11 @@ main() {
     "" \
     "• Keep it concise (one line)" \
     "• We'll automatically prepend the container name" \
-    "• Focus on the main issue or question" 2>/dev/null; then
-    ui_out "$(color cyan "📝 Title Guidelines")"
-    ui_out ""
-    ui_out "• Keep it concise (one line)"
-    ui_out "• We'll automatically prepend the container name"
-    ui_out "• Focus on the main issue or question"
-  fi
+    "• Focus on the main issue or question"
   q_title="$(input_single "Enter your title:" "" 10)"
   
   # Enhanced styled problem details prompt
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "150" --border-foreground "150" \
     --bold \
@@ -613,22 +615,11 @@ main() {
     "" \
     "What NOT to include:" \
     "• Entire logs (we upload them for you)" \
-    "• Secrets or tokens" 2>/dev/null; then
-    ui_out "$(color yellow "🔍 Problem Details Guidelines")"
-    ui_out ""
-    ui_out "What to include:"
-    ui_out "• What you did, what you expected, what actually happened"
-    ui_out "• Short, relevant facts (versions, settings) if needed"
-    ui_out "• Key context and recent changes"
-    ui_out ""
-    ui_out "What NOT to include:"
-    ui_out "• Entire logs (we upload them for you)"
-    ui_out "• Secrets or tokens"
-  fi
+    "• Secrets or tokens"
   q_details="$(multiline_input "Describe your problem in detail:" 10)"
   
   # Enhanced styled error snippet prompt
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "216" --border-foreground "216" \
     --bold \
@@ -636,19 +627,13 @@ main() {
     "" \
     "• Paste only the most relevant error lines (5-20 lines)" \
     "• We'll automatically format them as code blocks" \
-    "• Skip this if no specific errors to highlight" 2>/dev/null; then
-    ui_out "$(color red "⚠️ Error Snippet Guidelines")"
-    ui_out ""
-    ui_out "• Paste only the most relevant error lines (5-20 lines)"
-    ui_out "• We'll automatically format them as code blocks"
-    ui_out "• Skip this if no specific errors to highlight"
-  fi
+    "• Skip this if no specific errors to highlight"
   q_error="$(multiline_input "Optional - paste relevant error lines:" 0)"
   image_tag="$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)"
 
   # Uploads will proceed automatically.
   echo
-  if ! gum_run style \
+  gum_run style \
     --border rounded --margin "1" --padding "1 2" \
     --foreground "117" --border-foreground "117" \
     --bold \
@@ -656,13 +641,7 @@ main() {
     "" \
     "• Logs file: $(file_size_bytes "$logs_file") bytes" \
     "• Compose file: $(file_size_bytes "$comp_file") bytes" \
-    "• Ready for secure upload to logs.notifiarr.com" 2>/dev/null; then
-    ui_out "$(color cyan "📊 Review Collected Data")"
-    ui_out ""
-    ui_out "• Logs file: $(file_size_bytes "$logs_file") bytes"
-    ui_out "• Compose file: $(file_size_bytes "$comp_file") bytes"
-    ui_out "• Ready for secure upload to logs.notifiarr.com"
-  fi
+    "• Ready for secure upload to logs.notifiarr.com"
   echo
 
   # PrivateBin config (auto)
@@ -685,51 +664,74 @@ main() {
   # Final output
   cleanup_terminal
   echo
-  if ! gum_run style \
+  gum_run style \
     --border double --margin "1" --padding "1 3" \
     --foreground "117" --border-foreground "117" \
     --bold \
     "🎉 Your Discord-Ready Support Post" \
     "" \
-    "Copy everything between the scissor lines below:" 2>/dev/null; then
-    ui_out "$(color green "🎉 Your Discord-Ready Support Post")"
-    ui_out ""
-    ui_out "Copy everything between the scissor lines below:"
-  fi
+    "Copy everything between the scissor lines below:"
   echo
-  if ! gum_run style \
+  gum_run style \
     --foreground "150" --bold \
-    "---------------- Copy from here ----------------" 2>/dev/null; then
-    ui_out "$(color yellow "---------------- Copy from here ----------------")"
+    "---------------- Copy from here ----------------"
+  # Generate the final support post content using gum
+  local logs_line comp_line error_section=""
+  
+  if [[ -n "$logs_url" ]]; then
+    logs_line=" - Logs: $logs_url"
+  else
+    logs_line=" - Logs: (upload unavailable/failed) -> attach '$logs_file' or upload to https://logs.notifiarr.com"
   fi
-  echo "[${container}] ${q_title}"; echo
-  echo "Environment:";
-  echo " - Image: ${image_tag:-unknown}"
-  echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo
-  echo "Links:"
-  if [[ -n "$logs_url" ]]; then echo " - Logs: $logs_url"; else echo " - Logs: (upload unavailable/failed) -> attach '$logs_file' or upload to https://logs.notifiarr.com"; fi
-  if [[ -n "$comp_url" ]]; then echo " - Compose (auto): $comp_url"; else echo " - Compose: (upload unavailable/failed) -> attach '$comp_file' or upload to https://logs.notifiarr.com"; fi
-  echo
-  echo "Problem Details:"; echo "$q_details"; echo
+  
+  if [[ -n "$comp_url" ]]; then
+    comp_line=" - Compose (auto): $comp_url"
+  else
+    comp_line=" - Compose: (upload unavailable/failed) -> attach '$comp_file' or upload to https://logs.notifiarr.com"
+  fi
+  
   if [[ -n "$q_error" ]]; then
-    echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo
+    error_section="Error Snippet:"$'\n''```'$'\n'"$q_error"$'\n''```'$'\n'
   fi
-  if ! gum_run style \
+  
+  gum_run format -- \
+    "# [${container}] ${q_title}" \
+    "" \
+    "**Environment:**" \
+    " - Image: ${image_tag:-unknown}" \
+    " - OS/Arch: ${OS}/${ARCH_RAW}" \
+    "" \
+    "**Links:**" \
+    "$logs_line" \
+    "$comp_line" \
+    "" \
+    "**Problem Details:**" \
+    "$q_details" \
+    "" \
+    "$error_section"
+  gum_run style \
     --foreground "150" --bold \
-    "---------------- Copy to here ----------------" 2>/dev/null; then
-    ui_out "$(color yellow "---------------- Copy to here ----------------")"
-  fi
+    "---------------- Copy to here ----------------"
 
-  # Clipboard (optional)
+  # Clipboard (optional) - generate plain text version
+  local clipboard_content error_clip=""
+  
+  if [[ -n "$q_error" ]]; then
+    error_clip="Error Snippet:"$'\n''```'$'\n'"$q_error"$'\n''```'$'\n'
+  fi
+  
+  clipboard_content="[${container}] ${q_title}"$'\n\n'"Environment:"$'\n'" - Image: ${image_tag:-unknown}"$'\n'" - OS/Arch: ${OS}/${ARCH_RAW}"$'\n\n'"Links:"$'\n'"$logs_line"$'\n'"$comp_line"$'\n\n'"Problem Details:"$'\n'"$q_details"$'\n\n'"$error_clip"
+  
   if have pbcopy; then
-    { echo "[${container}] ${q_title}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem Details:"; echo "$q_details"; echo; if [[ -n "$q_error" ]]; then echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo; fi; } | pbcopy
+    printf "%s" "$clipboard_content" | pbcopy
     log "Copied to clipboard (pbcopy)."
   elif have xclip; then
-    { echo "[${container}] ${q_title}"; echo; echo "Environment:"; echo " - Image: ${image_tag:-unknown}"; echo " - OS/Arch: ${OS}/${ARCH_RAW}"; echo; echo "Links:"; echo " - Logs: ${logs_url:-\"upload unavailable/failed - see $logs_file\"}"; echo " - Compose: ${comp_url:-\"upload unavailable/failed - see $comp_file\"}"; echo; echo "Problem Details:"; echo "$q_details"; echo; if [[ -n "$q_error" ]]; then echo "Error Snippet:"; echo '```'; echo "$q_error"; echo '```'; echo; fi; } | xclip -selection clipboard
+    printf "%s" "$clipboard_content" | xclip -selection clipboard
     log "Copied to clipboard (xclip)."
   fi
 
-  echo
+  # Add spacing before final messages  
+  gum_run style ""
   log "Post this in the hotio Discord: $DISCORD_CHANNEL_URL"
   log "All temporary files will be removed on exit."
 }
