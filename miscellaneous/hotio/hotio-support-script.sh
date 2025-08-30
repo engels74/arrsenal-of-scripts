@@ -135,8 +135,8 @@ gum_run() {
         export NO_COLOR=""
         export GUM_INPUT_CURSOR_FOREGROUND="212"
         export GUM_INPUT_PROMPT_FOREGROUND="240"
-        # Execute gum with proper error handling
-        "$GUM_BIN" "$@" 2>/dev/null
+        # Execute gum reading from the real terminal to avoid consuming script stdin
+        "$GUM_BIN" "$@" </dev/tty 2>/dev/null
       fi
     else
       # No TTY - minimal configuration for headless environments
