@@ -127,7 +127,7 @@ gum_run() {
         # Full interactive mode with optimal gum environment
         export GUM_INPUT_CURSOR_FOREGROUND="212"
         export GUM_INPUT_PROMPT_FOREGROUND="240"
-        "$GUM_BIN" "$@" </dev/tty
+        "$GUM_BIN" "$@" </dev/tty >/dev/tty 2>/dev/tty
       else
         # Piped environment - configure for reliable output without capability queries
         export TERM="${TERM:-xterm-256color}"
@@ -136,13 +136,11 @@ gum_run() {
         export GUM_INPUT_CURSOR_FOREGROUND="212"
         export GUM_INPUT_PROMPT_FOREGROUND="240"
         # Execute gum reading from the real terminal to avoid consuming script stdin
-        "$GUM_BIN" "$@" </dev/tty 2>/dev/null
+        "$GUM_BIN" "$@" </dev/tty >/dev/tty 2>/dev/tty
       fi
     else
-      # No TTY - minimal configuration for headless environments
-      export TERM="xterm-256color"
-      export NO_COLOR=""
-      "$GUM_BIN" "$@" 2>/dev/null
+      # No TTY present; we require interactivity strictly
+      return 1
     fi
     
     # Restore original environment
