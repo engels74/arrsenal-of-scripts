@@ -202,7 +202,7 @@ RCLONE_RETRY_MAX_DELAY = 300  # Maximum delay between retries
 RCLONE_OVERALL_TIMEOUT = 7200  # 2 hours max for rclone operation
 
 # --- Discord & Notification Configuration ---
-DISCORD_WEBHOOK_URL = "***REMOVED***"
+DISCORD_WEBHOOK_URL = ""  # Add your Discord webhook URL here
 DISCORD_USERNAME = "Server Backup & Sync"
 DISCORD_AVATAR_URL = ""
 
@@ -214,7 +214,7 @@ PRIVATEBIN_CLI_PATH = "privatebin"
 ENABLE_UPTIME_KUMA_MAINTENANCE = True
 UPTIME_KUMA_URL = "https://uptimekuma.cccp.ps"
 UPTIME_KUMA_USERNAME = "engels74"
-UPTIME_KUMA_PASSWORD = "***REMOVED***"
+UPTIME_KUMA_PASSWORD = ""  # Add your Uptime Kuma password here
 UPTIME_KUMA_STATUS_PAGE_SLUG = "cccp-ps"
 MAINTENANCE_ID_FILE = Path("/tmp/backup_maintenance_id.txt")
 
