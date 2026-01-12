@@ -29,8 +29,6 @@
 # - (Optional) privatebin (from gearnode/privatebin)
 # -----------------------------------------------------------------------------
 
-from __future__ import annotations
-
 import argparse
 import atexit
 import contextlib
@@ -51,7 +49,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from types import FrameType
-from typing import TypedDict, Callable, TypeVar, cast, TYPE_CHECKING, NoReturn
+from typing import TypedDict, Callable, TypeVar, cast, TYPE_CHECKING
 
 
 # This script requires the 'requests' library for Discord notifications.
@@ -91,6 +89,8 @@ class BackupError(Exception):
 class ContainerShutdownError(BackupError):
     """Raised when containers cannot be stopped."""
 
+    remaining_containers: list[str]
+
     def __init__(self, message: str, remaining_containers: list[str] | None = None):
         super().__init__(message)
         self.remaining_containers = remaining_containers or []
@@ -110,6 +110,9 @@ class BackupVerificationError(BackupError):
 
 class RcloneSyncError(BackupError):
     """Raised when rclone sync fails."""
+
+    exit_code: int
+    is_retryable: bool
 
     def __init__(self, message: str, exit_code: int, is_retryable: bool = True):
         super().__init__(message)
@@ -353,7 +356,7 @@ lock_fd: int | None = None
 # -----------------------------------------------------------------------------
 
 
-def signal_handler(signum: int, frame: FrameType | None) -> None:
+def signal_handler(signum: int, _frame: FrameType | None) -> None:
     """Handle termination signals gracefully."""
     global shutdown_requested
 
@@ -375,9 +378,9 @@ def signal_handler(signum: int, frame: FrameType | None) -> None:
 
 def setup_signal_handlers() -> None:
     """Set up signal handlers for graceful termination."""
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGHUP, signal_handler)
+    _ = signal.signal(signal.SIGTERM, signal_handler)
+    _ = signal.signal(signal.SIGINT, signal_handler)
+    _ = signal.signal(signal.SIGHUP, signal_handler)
 
 
 def check_shutdown_requested() -> None:
@@ -400,7 +403,7 @@ def acquire_lock(lock_path: Path):
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         # Register cleanup with atexit as a backup
-        atexit.register(lambda: cleanup_lock(lock_path))
+        _ = atexit.register(lambda: cleanup_lock(lock_path))
         yield lock_fd
     except FileExistsError:
         # Check if the lock is stale (process that created it is dead)
@@ -408,7 +411,7 @@ def acquire_lock(lock_path: Path):
             log.warning("Found stale lock file. Removing and retrying...")
             lock_path.unlink(missing_ok=True)
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            atexit.register(lambda: cleanup_lock(lock_path))
+            _ = atexit.register(lambda: cleanup_lock(lock_path))
             yield lock_fd
         else:
             raise
@@ -575,14 +578,14 @@ class UptimeKumaRetry:
 
         while retry_count < self.max_retries:
             try:
-                if self.api is not None:
+                if self.api is not None:  # pyright: ignore[reportUnknownMemberType]
                     with contextlib.suppress(Exception):
                         _ = self.api.disconnect()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownVariableType, reportUnknownMemberType]
 
                 self.api = UptimeKumaApi(self.url, timeout=30)
                 _ = self.api.login(self.username, self.password)  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownVariableType, reportUnknownMemberType]
                 log.info("Successfully connected to Uptime Kuma")
-                return self.api
+                return self.api  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
             except Exception as e:
                 retry_count += 1
@@ -707,7 +710,7 @@ def create_backup_maintenance_window() -> int | None:
 
             if monitor_ids:
                 log.info(f"Adding {len(monitor_ids)} monitors to maintenance window")
-                _ = kuma.retry_operation(
+                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
                     kuma.api.add_monitor_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
                     maintenance_id,
                     monitor_ids,
@@ -731,7 +734,7 @@ def create_backup_maintenance_window() -> int | None:
                 log.info(
                     f"Adding status page '{UPTIME_KUMA_STATUS_PAGE_SLUG}' to maintenance window"
                 )
-                _ = kuma.retry_operation(
+                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
                     kuma.api.add_status_page_maintenance,  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
                     maintenance_id,
                     [{"id": status_page["id"]}],
@@ -854,7 +857,8 @@ def send_discord_notification(
         ],
     }
 
-    # Retry Discord notifications
+    # Retry Discord notifications with exponential backoff
+    retry_delays: list[float] = [1.0, 2.0, 4.0]
     for attempt in range(3):
         try:
             response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
@@ -864,7 +868,7 @@ def send_discord_notification(
             if attempt == 2:
                 log.error(f"Failed to send Discord notification after 3 attempts: {e}")
             else:
-                time.sleep(2**attempt)
+                time.sleep(retry_delays[attempt])
 
 
 def upload_log_to_privatebin(log_file: Path) -> str | None:
@@ -1111,7 +1115,7 @@ def _execute_rclone_sync(log_file: Path) -> dict[str, str | int]:
                 if not line.strip().startswith("{"):
                     continue
                 try:
-                    parsed_json: object = json.loads(line)
+                    parsed_json: object = json.loads(line)  # pyright: ignore[reportAny]
                     if not isinstance(parsed_json, dict):
                         continue
 
@@ -1130,8 +1134,8 @@ def _execute_rclone_sync(log_file: Path) -> dict[str, str | int]:
 
         # Append rclone log to main log
         with open(log_file, "a") as main_log, open(rclone_log, "r") as rclone_f:
-            main_log.write("\n--- Rclone Log ---\n")
-            main_log.write(rclone_f.read())
+            _ = main_log.write("\n--- Rclone Log ---\n")
+            _ = main_log.write(rclone_f.read())
 
         rclone_log.unlink(missing_ok=True)
 
@@ -1500,10 +1504,12 @@ def ensure_all_containers_stopped(
 
         send_discord_notification(
             "Container Shutdown Failed",
-            f"⚠️ **{len(final_remaining)} container(s) could not be stopped**\n\n"
-            f"Containers: `{container_list}`\n\n"
-            f"**BACKUP WILL PROCEED ANYWAY** - data may be inconsistent for these services.\n\n"
-            f"Manual intervention required after backup completes.",
+            (
+                f"⚠️ **{len(final_remaining)} container(s) could not be stopped**\n\n"
+                + f"Containers: `{container_list}`\n\n"
+                + f"**BACKUP WILL PROCEED ANYWAY** - data may be inconsistent for these services.\n\n"
+                + f"Manual intervention required after backup completes."
+            ),
             16711680,
             title_override="Backup Warning: Containers Still Running",
         )
@@ -1679,8 +1685,8 @@ def create_backup(backup_file: Path) -> bool:
                 compress_proc.stdout.close()
 
             # Wait with timeout
-            encrypt_proc.wait(timeout=3600)
-            compress_proc.wait(timeout=60)
+            _ = encrypt_proc.wait(timeout=3600)
+            _ = compress_proc.wait(timeout=60)
 
             if compress_proc.returncode != 0:
                 raise BackupCreationError(
@@ -1766,9 +1772,9 @@ def verify_backup(backup_file: Path) -> bool:
                 compress_proc.stdout.close()
 
             # Wait with timeouts
-            tar_proc.wait(timeout=1800)  # 30 minutes
-            compress_proc.wait(timeout=60)
-            openssl_proc.wait(timeout=60)
+            _ = tar_proc.wait(timeout=1800)  # 30 minutes
+            _ = compress_proc.wait(timeout=60)
+            _ = openssl_proc.wait(timeout=60)
 
             if openssl_proc.returncode != 0:
                 stderr = openssl_proc.stderr.read().decode() if openssl_proc.stderr else ""
