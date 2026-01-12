@@ -1,7 +1,6 @@
 # /// script
-# requires-python = ">=3.13"
+# requires-python = ">=3.14"
 # dependencies = [
-#     "pytz",
 #     "requests",
 #     "uptime-kuma-api",
 # ]
@@ -23,7 +22,7 @@
 # - Includes robust error handling, log rotation, and concurrency locking.
 #
 # Requirements:
-# - Python 3.13+
+# - Python 3.14+
 # - rclone, tar, pigz/gzip, openssl, docker
 # - Python 'requests' library (`uv pip install requests`)
 # - (Optional) privatebin (from gearnode/privatebin)
@@ -49,7 +48,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from types import FrameType
-from typing import TypedDict, Callable, TypeVar, cast, TYPE_CHECKING
+from typing import TypedDict, Callable, cast, TYPE_CHECKING, Self
 
 
 # This script requires the 'requests' library for Discord notifications.
@@ -63,14 +62,14 @@ except ImportError:
 
 # Uptime Kuma integration dependencies
 try:
-    import pytz  # pyright: ignore[reportMissingModuleSource]
+    from zoneinfo import ZoneInfo
     from uptime_kuma_api import UptimeKumaApi, MaintenanceStrategy  # pyright: ignore[reportMissingImports, reportUnknownVariableType]
 except ImportError:
     print(
         "Warning: Uptime Kuma dependencies not installed. Maintenance window functionality will be disabled."
     )
-    print("To enable: pip install uptime-kuma-api pytz")
-    pytz = None
+    print("To enable: pip install uptime-kuma-api")
+    ZoneInfo = None
     UptimeKumaApi = None
     MaintenanceStrategy = None
 
@@ -230,8 +229,6 @@ SCRIPT_OVERALL_TIMEOUT = 14400  # 4 hours max for entire script
 # Type Definitions for Uptime Kuma
 # -----------------------------------------------------------------------------
 
-T = TypeVar("T")
-
 
 class ServerInfo(TypedDict):
     serverTimezone: str
@@ -308,7 +305,7 @@ class BackupStage(Enum):
     COMPLETE = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class BackupState:
     """Maintains state throughout the backup process for proper recovery."""
 
@@ -436,8 +433,7 @@ def is_stale_lock(lock_path: Path) -> bool:
     """Check if lock file is stale (owning process is dead)."""
     try:
         # Check if lock file is older than script timeout
-        stat = lock_path.stat()
-        age = time.time() - stat.st_mtime
+        age = time.time() - lock_path.stat().st_mtime
         if age > SCRIPT_OVERALL_TIMEOUT:
             return True
 
@@ -495,7 +491,7 @@ class OperationTimeout(Exception):
     pass
 
 
-def run_with_timeout(
+def run_with_timeout[T](
     func: Callable[..., T],
     timeout: float,
     *args: object,
@@ -604,7 +600,7 @@ class UptimeKumaRetry:
 
         raise RuntimeError("Maximum connection retries exceeded")
 
-    def retry_operation(
+    def retry_operation[T](
         self, operation: Callable[..., T], *args: object, **kwargs: object
     ) -> T:
         """Retry an Uptime Kuma API operation with exponential backoff."""
@@ -637,7 +633,7 @@ class UptimeKumaRetry:
 
         raise RuntimeError("Maximum retries exceeded")
 
-    def __enter__(self) -> "UptimeKumaRetry":
+    def __enter__(self) -> Self:
         _ = self.connect()
         return self
 
@@ -659,7 +655,7 @@ def create_backup_maintenance_window() -> int | None:
             log.info("DRY RUN: Skipping maintenance window creation.")
         return None
 
-    if UptimeKumaApi is None or pytz is None or MaintenanceStrategy is None:
+    if UptimeKumaApi is None or ZoneInfo is None or MaintenanceStrategy is None:
         log.warning(
             "Uptime Kuma dependencies not available. Skipping maintenance window creation."
         )
@@ -681,7 +677,7 @@ def create_backup_maintenance_window() -> int | None:
                 ServerInfo,
                 cast(object, kuma.retry_operation(kuma.api.info)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
             )
-            server_timezone = pytz.timezone(str(server_info["serverTimezone"]))
+            server_timezone = ZoneInfo(str(server_info["serverTimezone"]))
             log.info(f"Using server timezone: {server_timezone}")
 
             maintenance = cast(
@@ -721,16 +717,14 @@ def create_backup_maintenance_window() -> int | None:
                 StatusPageList,
                 cast(object, kuma.retry_operation(kuma.api.get_status_pages)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
             )
-            status_page = next(
+            if status_page := next(
                 (
                     page
                     for page in status_pages
                     if page["slug"] == UPTIME_KUMA_STATUS_PAGE_SLUG
                 ),
                 None,
-            )
-
-            if status_page:
+            ):
                 log.info(
                     f"Adding status page '{UPTIME_KUMA_STATUS_PAGE_SLUG}' to maintenance window"
                 )
@@ -1126,8 +1120,7 @@ def _execute_rclone_sync(log_file: Path) -> dict[str, str | int]:
                         final_stats = stats_data
 
                     elif log_entry.get("level") == "error":
-                        msg = log_entry.get("msg")
-                        if isinstance(msg, str):
+                        if (msg := log_entry.get("msg")) and isinstance(msg, str):
                             error_lines.append(msg)
                 except json.JSONDecodeError:
                     continue
