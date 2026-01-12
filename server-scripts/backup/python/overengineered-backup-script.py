@@ -62,7 +62,7 @@ except ImportError:
 
 # Uptime Kuma integration dependencies
 try:
-    from zoneinfo import ZoneInfo
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     from uptime_kuma_api import UptimeKumaApi, MaintenanceStrategy  # pyright: ignore[reportMissingImports, reportUnknownVariableType]
 except ImportError:
     print(
@@ -70,6 +70,7 @@ except ImportError:
     )
     print("To enable: pip install uptime-kuma-api")
     ZoneInfo = None
+    ZoneInfoNotFoundError = None  # pyright: ignore[reportConstantRedefinition]
     UptimeKumaApi = None
     MaintenanceStrategy = None
 
@@ -677,7 +678,15 @@ def create_backup_maintenance_window() -> int | None:
                 ServerInfo,
                 cast(object, kuma.retry_operation(kuma.api.info)),  # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType, reportUnknownArgumentType]
             )
-            server_timezone = ZoneInfo(str(server_info["serverTimezone"]))
+            raw_timezone = str(server_info["serverTimezone"])
+            try:
+                server_timezone = str(ZoneInfo(raw_timezone))
+            except ZoneInfoNotFoundError:
+                log.warning(
+                    f"Timezone '{raw_timezone}' not found in system tzdata. "
+                    "Using raw timezone string from Uptime Kuma."
+                )
+                server_timezone = raw_timezone
             log.info(f"Using server timezone: {server_timezone}")
 
             maintenance = cast(
@@ -690,7 +699,7 @@ def create_backup_maintenance_window() -> int | None:
                         description="Automated server backup is currently running. Services may be temporarily unavailable.",
                         strategy=MaintenanceStrategy.MANUAL,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                         active=True,
-                        timezoneOption=str(server_timezone),
+                        timezoneOption=server_timezone,
                     ),
                 ),
             )
