@@ -60,17 +60,17 @@ except ImportError:
     )
     sys.exit(1)
 
-# Uptime Kuma integration dependencies
+# zoneinfo is part of Python standard library (3.9+), always available
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# Uptime Kuma integration dependencies (optional)
 try:
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     from uptime_kuma_api import UptimeKumaApi, MaintenanceStrategy  # pyright: ignore[reportMissingImports, reportUnknownVariableType]
 except ImportError:
     print(
         "Warning: Uptime Kuma dependencies not installed. Maintenance window functionality will be disabled."
     )
     print("To enable: pip install uptime-kuma-api")
-    ZoneInfo = None
-    ZoneInfoNotFoundError = None  # pyright: ignore[reportConstantRedefinition]
     UptimeKumaApi = None
     MaintenanceStrategy = None
 
@@ -656,7 +656,7 @@ def create_backup_maintenance_window() -> int | None:
             log.info("DRY RUN: Skipping maintenance window creation.")
         return None
 
-    if UptimeKumaApi is None or ZoneInfo is None or MaintenanceStrategy is None:
+    if UptimeKumaApi is None or MaintenanceStrategy is None:
         log.warning(
             "Uptime Kuma dependencies not available. Skipping maintenance window creation."
         )
@@ -683,8 +683,7 @@ def create_backup_maintenance_window() -> int | None:
                 server_timezone = str(ZoneInfo(raw_timezone))
             except ZoneInfoNotFoundError:
                 log.warning(
-                    f"Timezone '{raw_timezone}' not found in system tzdata. "
-                    "Using raw timezone string from Uptime Kuma."
+                    f"Timezone '{raw_timezone}' not found in system tzdata. Using raw timezone string from Uptime Kuma."
                 )
                 server_timezone = raw_timezone
             log.info(f"Using server timezone: {server_timezone}")
