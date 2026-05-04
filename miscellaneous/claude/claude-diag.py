@@ -9,6 +9,7 @@ See --help for flags.
 """
 
 import argparse
+import io
 import json
 import os
 import platform
@@ -19,6 +20,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +34,7 @@ type JsonObject = dict[str, JsonValue]
 type JsonValue = None | bool | int | float | str | list[JsonValue] | JsonObject
 type PathInput = str | os.PathLike[str]
 type Redact = Callable[[object | None], str]
+type HttpPost = Callable[[str, bytes, dict[str, str]], tuple[int, str]]
 
 __version__ = "0.1.0"
 SCRIPT_URL = (
@@ -924,6 +929,180 @@ def section_footer(
     )
 
 
+# --------------------------------------------------------------- pastefy --
+
+PASTEFY_DEFAULT_URL = "https://pastefy.app"
+PASTEFY_VISIBILITY = "UNLISTED"
+
+
+class PastefyPublishError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class PastefyPublishResult:
+    rendered_url: str
+    raw_url: str
+
+
+def pastefy_base_url(url: str) -> str:
+    return url.rstrip("/")
+
+
+def pastefy_host(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.netloc or parsed.path or url
+
+
+def pastefy_api_url(base_url: str) -> str:
+    return f"{pastefy_base_url(base_url)}/api/v2/paste"
+
+
+def _http_post_json(url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]:
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status = int(getattr(response, "status", response.getcode()))
+            response_body = response.read().decode("utf-8", errors="replace")
+            return status, response_body
+    except urllib.error.HTTPError as e:
+        response_body = e.read().decode("utf-8", errors="replace")
+        raise PastefyPublishError(
+            f"HTTP {e.code}: {response_body[:500] or e.reason}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise PastefyPublishError(f"network error: {e.reason}") from e
+    except OSError as e:
+        raise PastefyPublishError(f"network error: {e}") from e
+
+
+def publish_pastefy_report(
+    *,
+    base_url: str,
+    token: str,
+    title: str,
+    content: str,
+    expire_at: str | None,
+    http_post: HttpPost = _http_post_json,
+) -> PastefyPublishResult:
+    payload: JsonObject = {
+        "title": title,
+        "content": content,
+        "visibility": PASTEFY_VISIBILITY,
+        "type": "PASTE",
+    }
+    if expire_at:
+        payload["expireAt"] = expire_at
+
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": f"claude-diag/{__version__}",
+    }
+    status, response_body = http_post(pastefy_api_url(base_url), body, headers)
+    if status < 200 or status >= 300:
+        raise PastefyPublishError(
+            f"HTTP {status}: {response_body[:500] or 'empty response'}"
+        )
+
+    try:
+        data = load_json_text(response_body)
+    except Exception as e:
+        raise PastefyPublishError("malformed JSON response from Pastefy") from e
+    if not isinstance(data, dict):
+        raise PastefyPublishError("unexpected Pastefy response shape")
+    paste = data.get("paste")
+    if not isinstance(paste, dict):
+        raise PastefyPublishError("Pastefy response did not include paste details")
+
+    raw_url = paste.get("raw_url") or paste.get("rawUrl")
+    paste_url = paste.get("url") or paste.get("paste_url") or paste.get("pasteUrl")
+    paste_id = paste.get("id")
+    if not isinstance(paste_url, str) or not paste_url:
+        if isinstance(paste_id, str) and paste_id:
+            paste_url = f"{pastefy_base_url(base_url)}/{paste_id}"
+    if not isinstance(raw_url, str) or not raw_url:
+        raise PastefyPublishError("Pastefy response did not include raw_url")
+    if not isinstance(paste_url, str) or not paste_url:
+        raise PastefyPublishError("Pastefy response did not include a paste URL")
+    return PastefyPublishResult(rendered_url=paste_url, raw_url=raw_url)
+
+
+def confirm_pastefy_publish(
+    *,
+    base_url: str,
+    title: str,
+    report: str,
+    saved_path: str | None,
+    input_func: Callable[[], str] = input,
+    stream: object = sys.stderr,
+) -> bool:
+    print("[claude-diag] Pastefy publishing requested:", file=stream)
+    print(f"  target host: {pastefy_host(base_url)}", file=stream)
+    print(f"  visibility: {PASTEFY_VISIBILITY}", file=stream)
+    print(f"  title: {title}", file=stream)
+    print(f"  report bytes: {len(report.encode('utf-8')):,}", file=stream)
+    if saved_path:
+        print(f"  local report: {saved_path}", file=stream)
+    print("Publish redacted report to pastefy.app? [y/N]:", end="", file=stream, flush=True)
+    try:
+        answer = input_func()
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def run_pastefy_publish(
+    args: "Args",
+    report: str,
+    saved_path: str | None,
+    timestamp: str,
+    *,
+    input_func: Callable[[], str] = input,
+    http_post: HttpPost = _http_post_json,
+    stream: object = sys.stderr,
+) -> int:
+    token = args.pastefy_token
+    if not token:
+        print(
+            "[claude-diag] --publish requires --pastefy-token or "
+            "PASTEFY_API_TOKEN.",
+            file=stream,
+        )
+        return 1
+
+    title = f"claude-diag-{timestamp}.md"
+    if not args.yes and not confirm_pastefy_publish(
+        base_url=args.pastefy_url,
+        title=title,
+        report=report,
+        saved_path=saved_path,
+        input_func=input_func,
+        stream=stream,
+    ):
+        print("[claude-diag] Pastefy publish skipped.", file=stream)
+        return 0
+
+    try:
+        result = publish_pastefy_report(
+            base_url=args.pastefy_url,
+            token=token,
+            title=title,
+            content=report,
+            expire_at=args.pastefy_expire_at,
+            http_post=http_post,
+        )
+    except PastefyPublishError as e:
+        print(f"[claude-diag] Pastefy upload failed: {e}", file=stream)
+        return 1
+
+    print(f"[claude-diag] Pastefy URL: {result.rendered_url}", file=stream)
+    print(f"[claude-diag] Pastefy raw URL: {result.raw_url}", file=stream)
+    return 0
+
+
 # ----------------------------------------------------------------- self-test --
 
 SELF_TEST_FIXTURE = """
@@ -984,6 +1163,7 @@ def self_test() -> int:
     print("=== self-test fixture (redacted) ===")
     print(out)
     context_failures = _self_test_context()
+    pastefy_failures = _self_test_pastefy()
     print("=== checks ===")
     if failures:
         print(f"FAIL: leaked substrings: {failures}")
@@ -993,7 +1173,15 @@ def self_test() -> int:
         print(f"FAIL: dropped private IPs (should be kept): {private_dropped}")
     for failure in context_failures:
         print(f"FAIL: {failure}")
-    ok = not failures and not missing and not private_dropped and not context_failures
+    for failure in pastefy_failures:
+        print(f"FAIL: {failure}")
+    ok = (
+        not failures
+        and not missing
+        and not private_dropped
+        and not context_failures
+        and not pastefy_failures
+    )
     print("RESULT:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -1119,6 +1307,184 @@ def _self_test_context() -> list[str]:
     return failures
 
 
+def _test_args() -> "Args":
+    args = Args()
+    args.publish = True
+    args.pastefy_url = PASTEFY_DEFAULT_URL
+    args.pastefy_token = "test-token"
+    args.pastefy_expire_at = None
+    args.yes = False
+    return args
+
+
+def _self_test_pastefy() -> list[str]:
+    failures: list[str] = []
+    report = "# redacted\n"
+    timestamp = "20260101T000000Z"
+    captured: list[tuple[str, JsonObject, dict[str, str]]] = []
+
+    def fake_success(
+        url: str,
+        body: bytes,
+        headers: dict[str, str],
+    ) -> tuple[int, str]:
+        data = load_json_text(body.decode("utf-8"))
+        if not isinstance(data, dict):
+            failures.append("Pastefy request body was not a JSON object")
+            data = {}
+        captured.append((url, data, headers))
+        return 200, json.dumps({
+            "paste": {
+                "id": "abc123",
+                "raw_url": "https://pastefy.app/api/v2/paste/abc123/raw",
+            },
+        })
+
+    for answer in ("", "n", "maybe"):
+        sink = io.StringIO()
+        if confirm_pastefy_publish(
+            base_url=PASTEFY_DEFAULT_URL,
+            title=f"claude-diag-{timestamp}.md",
+            report=report,
+            saved_path="/tmp/claude-diag-test.md",
+            input_func=lambda answer=answer: answer,
+            stream=sink,
+        ):
+            failures.append(f"confirmation accepted {answer!r}")
+        if "Publish redacted report to pastefy.app? [y/N]:" not in sink.getvalue():
+            failures.append("confirmation prompt text changed")
+
+    for answer in ("y", "yes", " YES "):
+        if not confirm_pastefy_publish(
+            base_url=PASTEFY_DEFAULT_URL,
+            title=f"claude-diag-{timestamp}.md",
+            report=report,
+            saved_path=None,
+            input_func=lambda answer=answer: answer,
+            stream=io.StringIO(),
+        ):
+            failures.append(f"confirmation rejected {answer!r}")
+
+    args = _test_args()
+    args.yes = True
+    rc = run_pastefy_publish(
+        args,
+        report,
+        "/tmp/claude-diag-test.md",
+        timestamp,
+        input_func=lambda: (_ for _ in ()).throw(
+            AssertionError("--yes should not prompt")
+        ),
+        http_post=fake_success,
+        stream=io.StringIO(),
+    )
+    if rc != 0:
+        failures.append("--yes Pastefy publish did not succeed")
+    if not captured:
+        failures.append("--yes Pastefy publish did not upload")
+    else:
+        url, body, headers = captured[-1]
+        if url != "https://pastefy.app/api/v2/paste":
+            failures.append(f"Pastefy upload URL mismatch: {url}")
+        if body.get("title") != f"claude-diag-{timestamp}.md":
+            failures.append("Pastefy title did not keep .md extension")
+        if body.get("content") != report:
+            failures.append("Pastefy content did not match report")
+        if body.get("visibility") != PASTEFY_VISIBILITY:
+            failures.append("Pastefy visibility was not UNLISTED")
+        if body.get("type") != "PASTE":
+            failures.append("Pastefy type was not PASTE")
+        if headers.get("Authorization") != "Bearer test-token":
+            failures.append("Pastefy Authorization header missing")
+
+    args = _test_args()
+    args.pastefy_expire_at = "2026-12-31T00:00:00Z"
+    captured.clear()
+    _ = publish_pastefy_report(
+        base_url=args.pastefy_url,
+        token=args.pastefy_token or "",
+        title=f"claude-diag-{timestamp}.md",
+        content=report,
+        expire_at=args.pastefy_expire_at,
+        http_post=fake_success,
+    )
+    if not captured or captured[-1][1].get("expireAt") != args.pastefy_expire_at:
+        failures.append("Pastefy expireAt was not passed through")
+
+    args = _test_args()
+    args.pastefy_token = None
+    rc = run_pastefy_publish(
+        args,
+        report,
+        None,
+        timestamp,
+        input_func=lambda: "y",
+        http_post=fake_success,
+        stream=io.StringIO(),
+    )
+    if rc == 0:
+        failures.append("Pastefy publish without token succeeded")
+
+    def fake_http_error(
+        _url: str,
+        _body: bytes,
+        _headers: dict[str, str],
+    ) -> tuple[int, str]:
+        return 500, "server error"
+
+    try:
+        _ = publish_pastefy_report(
+            base_url=PASTEFY_DEFAULT_URL,
+            token="test-token",
+            title=f"claude-diag-{timestamp}.md",
+            content=report,
+            expire_at=None,
+            http_post=fake_http_error,
+        )
+        failures.append("Pastefy HTTP error did not fail")
+    except PastefyPublishError:
+        pass
+
+    def fake_malformed(
+        _url: str,
+        _body: bytes,
+        _headers: dict[str, str],
+    ) -> tuple[int, str]:
+        return 200, "{bad json"
+
+    try:
+        _ = publish_pastefy_report(
+            base_url=PASTEFY_DEFAULT_URL,
+            token="test-token",
+            title=f"claude-diag-{timestamp}.md",
+            content=report,
+            expire_at=None,
+            http_post=fake_malformed,
+        )
+        failures.append("Pastefy malformed JSON response did not fail")
+    except PastefyPublishError:
+        pass
+
+    sink = io.StringIO()
+    args = _test_args()
+    args.yes = True
+    rc = run_pastefy_publish(
+        args,
+        report,
+        None,
+        timestamp,
+        http_post=fake_success,
+        stream=sink,
+    )
+    output = sink.getvalue()
+    if rc != 0 or "Pastefy URL: https://pastefy.app/abc123" not in output:
+        failures.append("Pastefy rendered URL was not printed")
+    if "Pastefy raw URL: https://pastefy.app/api/v2/paste/abc123/raw" not in output:
+        failures.append("Pastefy raw URL was not printed")
+
+    return failures
+
+
 # ---------------------------------------------------------------------- cli --
 
 class Args(argparse.Namespace):
@@ -1128,6 +1494,11 @@ class Args(argparse.Namespace):
     no_save: bool = False
     model: str | None = None
     timeout: int = 45
+    publish: bool = False
+    pastefy_url: str = PASTEFY_DEFAULT_URL
+    pastefy_token: str | None = None
+    pastefy_expire_at: str | None = None
+    yes: bool = False
     self_test: bool = False
     debug: bool = False
 
@@ -1169,6 +1540,30 @@ def parse_args(argv: Sequence[str]) -> Args:
         type=int,
         default=45,
         help="Per-subprocess timeout in seconds (default: 45).",
+    )
+    _ = p.add_argument(
+        "--publish",
+        action="store_true",
+        help="Offer to publish the redacted report as an unlisted Pastefy paste.",
+    )
+    _ = p.add_argument(
+        "--pastefy-url",
+        default=PASTEFY_DEFAULT_URL,
+        help=f"Pastefy base URL (default: {PASTEFY_DEFAULT_URL}).",
+    )
+    _ = p.add_argument(
+        "--pastefy-token",
+        default=os.environ.get("PASTEFY_API_TOKEN"),
+        help="Pastefy API token. Default: PASTEFY_API_TOKEN.",
+    )
+    _ = p.add_argument(
+        "--pastefy-expire-at",
+        help="Optional Pastefy expiration timestamp passed as expireAt.",
+    )
+    _ = p.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the Pastefy publish confirmation prompt.",
     )
     _ = p.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     _ = p.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
@@ -1219,14 +1614,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         _ = self_test()
 
     report = build_report(args, redact)
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    saved_path: str | None = None
 
     if not args.no_save:
         out_path = args.output
         if not out_path:
-            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
             out_path = f"/tmp/claude-diag-{ts}.md"
         try:
             _ = Path(out_path).write_text(report)
+            saved_path = out_path
             print(
                 f"[claude-diag] wrote {out_path} "
                 + f"({len(report):,} bytes)",
@@ -1239,6 +1636,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ = sys.stdout.write(report)
     if not report.endswith("\n"):
         _ = sys.stdout.write("\n")
+    if args.publish:
+        return run_pastefy_publish(args, report, saved_path, ts)
     return 0
 
 
