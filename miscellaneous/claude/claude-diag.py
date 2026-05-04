@@ -17,20 +17,29 @@ import shutil
 import socket
 import subprocess
 import sys
-from datetime import datetime, timezone
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
+from typing import ClassVar, cast
+from zoneinfo import ZoneInfo
+
+type JsonObject = dict[str, JsonValue]
+type JsonValue = None | bool | int | float | str | list[JsonValue] | JsonObject
+type PathInput = str | os.PathLike[str]
+type Redact = Callable[[object | None], str]
 
 __version__ = "0.1.0"
 
 HOME = Path.home()
 USERNAME = HOME.name
 CLAUDE_DIR = HOME / ".claude"
+UTC = ZoneInfo("UTC")
 
 
 # ---------------------------------------------------------------- redactor --
 
 class Redactor:
-    PATTERNS = [
+    PATTERNS: ClassVar[tuple[tuple[re.Pattern[str], str], ...]] = (
         (re.compile(r"sk-ant-[A-Za-z0-9_\-]+"), "[REDACTED:ANTHROPIC_KEY]"),
         (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "[REDACTED:OPENAI_KEY]"),
         (re.compile(r"gh[posru]_[A-Za-z0-9]{30,}"), "[REDACTED:GITHUB_TOKEN]"),
@@ -41,23 +50,28 @@ class Redactor:
          "[REDACTED:EMAIL]"),
         (re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
          "Bearer [REDACTED]"),
-    ]
-    IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-    URL_QS = re.compile(r"(https?://[^\s?#]+)\?[^\s#]*")
-    AUTH_HEADER = re.compile(
+    )
+    IPV4: ClassVar[re.Pattern[str]] = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+    URL_QS: ClassVar[re.Pattern[str]] = re.compile(r"(https?://[^\s?#]+)\?[^\s#]*")
+    AUTH_HEADER: ClassVar[re.Pattern[str]] = re.compile(
         r"(?i)\b(Authorization|X-API-Key|X-Auth-Token|Cookie)(\s*[:=]\s*)\S+"
     )
-    USERS_PATH = re.compile(r"/Users/[^/\s:\"',]+")
-    HOME_PATH = re.compile(r"/home/[^/\s:\"',]+")
-    PROJECT_PATH = re.compile(r"~/\.claude/projects/([^/\s\"',]+)")
+    USERS_PATH: ClassVar[re.Pattern[str]] = re.compile(r"/Users/[^/\s:\"',]+")
+    HOME_PATH: ClassVar[re.Pattern[str]] = re.compile(r"/home/[^/\s:\"',]+")
+    PROJECT_PATH: ClassVar[re.Pattern[str]] = re.compile(r"~/\.claude/projects/([^/\s\"',]+)")
 
-    def __init__(self):
+    hostname: str
+    short_hostname: str
+    _project_ids: dict[str, int]
+    _next_id: int
+
+    def __init__(self) -> None:
         self.hostname = socket.gethostname() or ""
         self.short_hostname = self.hostname.split(".")[0] if self.hostname else ""
         self._project_ids = {}
         self._next_id = 1
 
-    def _ip(self, m):
+    def _ip(self, m: re.Match[str]) -> str:
         ip = m.group(0)
         try:
             o = [int(x) for x in ip.split(".")]
@@ -72,14 +86,14 @@ class Redactor:
         if o[0] == 0: return ip
         return "[REDACTED:IP]"
 
-    def _project(self, m):
+    def _project(self, m: re.Match[str]) -> str:
         name = m.group(1)
         if name not in self._project_ids:
             self._project_ids[name] = self._next_id
             self._next_id += 1
         return f"~/.claude/projects/[PROJECT-{self._project_ids[name]}]"
 
-    def __call__(self, s):
+    def __call__(self, s: object | None) -> str:
         if s is None:
             return ""
         if not isinstance(s, str):
@@ -100,13 +114,13 @@ class Redactor:
         return s
 
     @property
-    def project_count(self):
+    def project_count(self) -> int:
         return len(self._project_ids)
 
 
 # ----------------------------------------------------------------- helpers --
 
-def run(cmd, timeout):
+def run(cmd: Sequence[str], timeout: int) -> tuple[str, int]:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         out = (r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")
@@ -119,7 +133,7 @@ def run(cmd, timeout):
         return f"[error: {e}]", 1
 
 
-def safe_read(path, max_bytes=512 * 1024):
+def safe_read(path: PathInput, max_bytes: int = 512 * 1024) -> str | None:
     try:
         p = Path(path)
         if not p.is_file():
@@ -132,7 +146,7 @@ def safe_read(path, max_bytes=512 * 1024):
         return f"[read error: {e}]"
 
 
-def folder_size(path):
+def folder_size(path: PathInput) -> tuple[int | None, int]:
     p = Path(path)
     if not p.exists():
         return None, 0
@@ -147,7 +161,7 @@ def folder_size(path):
     return total, count
 
 
-def humansize(n):
+def humansize(n: int | float | None) -> str:
     if n is None:
         return "n/a"
     for unit in ("B", "K", "M", "G", "T"):
@@ -157,7 +171,7 @@ def humansize(n):
     return f"{n:.1f}P"
 
 
-def line_count(path):
+def line_count(path: PathInput) -> int:
     p = Path(path)
     if not p.is_file():
         return 0
@@ -168,19 +182,23 @@ def line_count(path):
         return 0
 
 
-def details(title, body, open_=False):
+def details(title: str, body: str, open_: bool = False) -> str:
     o = " open" if open_ else ""
     return f"<details{o}>\n<summary>{title}</summary>\n\n{body}\n\n</details>\n"
 
 
-def code_block(s, lang=""):
+def code_block(s: str, lang: str = "") -> str:
     return f"```{lang}\n{s.rstrip()}\n```"
+
+
+def load_json_text(text: str) -> JsonValue:
+    return cast(JsonValue, json.loads(text))
 
 
 # ---------------------------------------------------------------- sections --
 
-def section_header():
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+def section_header() -> str:
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     return (
         f"# Claude Code diagnostic report\n\n"
         f"- Generator: `claude-diag` v{__version__}\n"
@@ -191,7 +209,7 @@ def section_header():
     )
 
 
-def section_environment(redact, timeout):
+def section_environment(redact: Redact, timeout: int) -> str:
     uname = platform.uname()
     py = sys.version.split()[0]
     node_v, _ = run(["node", "--version"], timeout)
@@ -212,7 +230,7 @@ def section_environment(redact, timeout):
     return "## Environment\n\n" + "\n".join(lines) + "\n"
 
 
-def section_claude(redact, timeout):
+def section_claude(redact: Redact, timeout: int) -> str:
     version, _ = run(["claude", "--version"], timeout)
     path = shutil.which("claude") or "[not on PATH]"
     auth_env_keys = [
@@ -234,7 +252,7 @@ def section_claude(redact, timeout):
     return "## Claude Code\n\n" + "\n".join(lines) + "\n"
 
 
-def section_context(redact, model, timeout, skip):
+def section_context(redact: Redact, model: str, timeout: int, skip: bool) -> str:
     if skip:
         return "## `/context` output\n\n_skipped via `--no-context`_\n"
     cmd = [
@@ -246,23 +264,23 @@ def section_context(redact, model, timeout, skip):
         return f"## `/context` output\n\n_{out}_\n"
     body = redact(out) if out else "_no output_"
     return (
-        f"## `/context` output\n\n"
-        f"_Captured via `claude -p /context --model {model}` "
-        f"(exit code {code}). Paths and secrets redacted._\n\n"
+        "## `/context` output\n\n"
+        + f"_Captured via `claude -p /context --model {model}` "
+        + f"(exit code {code}). Paths and secrets redacted._\n\n"
         + code_block(body, "")
         + "\n"
     )
 
 
-def _settings_summary(data, redact):
-    lines = []
+def _settings_summary(data: JsonObject, redact: Redact) -> str:
+    lines: list[str] = []
     lines.append(f"- Top-level keys: `{', '.join(sorted(data.keys())) or '(none)'}`")
-    env = data.get("env", {})
+    env = data.get("env")
     if isinstance(env, dict) and env:
         lines.append(f"- env vars (keys only, {len(env)}):")
         for k in sorted(env.keys()):
             lines.append(f"  - `{redact(k)}`")
-    hooks = data.get("hooks", {})
+    hooks = data.get("hooks")
     if isinstance(hooks, dict) and hooks:
         lines.append(f"- hooks ({len(hooks)} event types):")
         for event in sorted(hooks.keys()):
@@ -276,7 +294,7 @@ def _settings_summary(data, redact):
                         if isinstance(h, list):
                             n_cmd += len(h)
             lines.append(f"  - `{event}`: {n_match} matchers, {n_cmd} commands")
-    perms = data.get("permissions", {})
+    perms = data.get("permissions")
     if isinstance(perms, dict) and perms:
         for k in ("allow", "ask", "deny", "additionalDirectories"):
             v = perms.get(k)
@@ -293,7 +311,7 @@ def _settings_summary(data, redact):
             lines.append(f"- statusLine: configured")
     else:
         lines.append("- statusLine: not configured")
-    plugins = data.get("enabledPlugins", {})
+    plugins = data.get("enabledPlugins")
     if isinstance(plugins, dict) and plugins:
         lines.append(f"- enabledPlugins ({len(plugins)}):")
         for k in sorted(plugins.keys()):
@@ -309,7 +327,7 @@ def _settings_summary(data, redact):
     return "\n".join(lines)
 
 
-def section_global_settings(redact):
+def section_global_settings(redact: Redact) -> str:
     out = ["## Global settings (`~/.claude/settings.json`)\n"]
     for fname in ("settings.json", "settings.local.json"):
         path = CLAUDE_DIR / fname
@@ -317,17 +335,20 @@ def section_global_settings(redact):
             out.append(f"### `~/.claude/{fname}`\n\n_not present_\n")
             continue
         try:
-            data = json.loads(path.read_text())
+            data = load_json_text(path.read_text())
         except Exception as e:
             out.append(f"### `~/.claude/{fname}`\n\n_parse error: {redact(str(e))}_\n")
             continue
-        out.append(f"### `~/.claude/{fname}`\n\n" + _settings_summary(data, redact) + "\n")
+        if isinstance(data, dict):
+            out.append(f"### `~/.claude/{fname}`\n\n" + _settings_summary(data, redact) + "\n")
+        else:
+            out.append(f"### `~/.claude/{fname}`\n\n_malformed: expected JSON object_\n")
     return "\n".join(out)
 
 
-def section_project_settings(redact):
+def section_project_settings(redact: Redact) -> str:
     cwd = Path.cwd()
-    candidates = [
+    candidates: list[tuple[Path, str]] = [
         (cwd / ".claude" / "settings.json", "$PWD/.claude/settings.json"),
         (cwd / ".claude" / "settings.local.json", "$PWD/.claude/settings.local.json"),
         (cwd / ".mcp.json", "$PWD/.mcp.json"),
@@ -339,33 +360,38 @@ def section_project_settings(redact):
             continue
         found_any = True
         try:
-            data = json.loads(path.read_text())
+            data = load_json_text(path.read_text())
         except Exception as e:
             out.append(f"### `{label}`\n\n_parse error: {redact(str(e))}_\n")
             continue
         if label.endswith(".mcp.json"):
-            servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
-            out.append(f"### `{label}`\n\n- mcpServers: {len(servers)} "
-                       f"({', '.join(sorted(servers.keys()))})\n")
-        else:
+            servers = data.get("mcpServers") if isinstance(data, dict) else None
+            server_names = sorted(servers.keys()) if isinstance(servers, dict) else []
+            out.append(
+                f"### `{label}`\n\n- mcpServers: {len(server_names)} "
+                + f"({', '.join(server_names)})\n"
+            )
+        elif isinstance(data, dict):
             out.append(f"### `{label}`\n\n" + _settings_summary(data, redact) + "\n")
+        else:
+            out.append(f"### `{label}`\n\n_malformed: expected JSON object_\n")
     if not found_any:
         out.append("_no project-level Claude Code config in `$PWD`_\n")
     return "\n".join(out)
 
 
-def section_mcp(redact, timeout):
+def section_mcp(redact: Redact, timeout: int) -> str:
     out, code = run(["claude", "mcp", "list"], timeout)
     body = redact(out) if out else "_no output_"
     return (
-        f"## MCP servers\n\n"
-        f"_via `claude mcp list` (exit code {code})._\n\n"
+        "## MCP servers\n\n"
+        + f"_via `claude mcp list` (exit code {code})._\n\n"
         + code_block(body, "")
         + "\n"
     )
 
 
-def section_plugins(redact, timeout):
+def section_plugins(redact: Redact, timeout: int) -> str:
     out, code = run(["claude", "plugin", "list"], timeout)
     body = redact(out) if out else "_no output_"
     parts = [
@@ -375,31 +401,33 @@ def section_plugins(redact, timeout):
     plugin_json = CLAUDE_DIR / "plugins" / "installed_plugins.json"
     if plugin_json.exists():
         try:
-            data = json.loads(plugin_json.read_text())
+            data = load_json_text(plugin_json.read_text())
             count = sum(len(v) if isinstance(v, dict) else 0 for v in data.values()) \
                 if isinstance(data, dict) else 0
-            parts.append(f"\n- `installed_plugins.json` size: "
-                         f"{humansize(plugin_json.stat().st_size)}, "
-                         f"~{count} entries\n")
+            parts.append(
+                "\n- `installed_plugins.json` size: "
+                + f"{humansize(plugin_json.stat().st_size)}, "
+                + f"~{count} entries\n"
+            )
         except Exception as e:
             parts.append(f"\n- `installed_plugins.json` parse error: {redact(str(e))}\n")
     return "\n".join(parts)
 
 
-def _list_dir_entries(path):
+def _list_dir_entries(path: PathInput) -> list[Path]:
     try:
         return sorted(p for p in Path(path).iterdir() if not p.name.startswith("."))
     except Exception:
         return []
 
 
-def section_skills(redact):
+def section_skills(redact: Redact) -> str:
     skills_dir = CLAUDE_DIR / "skills"
     if not skills_dir.exists():
         return "## Skills\n\n_`~/.claude/skills/` not present_\n"
     entries = _list_dir_entries(skills_dir)
     lines = [f"## Skills\n\n_{len(entries)} entries in `~/.claude/skills/`_\n"]
-    rows = []
+    rows: list[str] = []
     for e in entries:
         if e.is_dir():
             total, n = folder_size(e)
@@ -411,14 +439,14 @@ def section_skills(redact):
     return "\n".join(lines) + "\n"
 
 
-def section_agents(redact, include_memories):
+def section_agents(redact: Redact, include_memories: bool) -> str:
     agents_dir = CLAUDE_DIR / "agents"
     if not agents_dir.exists():
         return "## Agents\n\n_`~/.claude/agents/` not present_\n"
     entries = sorted(p for p in agents_dir.glob("*.md"))
     lines = [f"## Agents\n\n_{len(entries)} agent files in `~/.claude/agents/`_\n"]
-    rows = []
-    bodies = []
+    rows: list[str] = []
+    bodies: list[str] = []
     for e in entries:
         lc = line_count(e)
         rows.append(f"- `{redact(e.name)}` — {lc} lines, {humansize(e.stat().st_size)}")
@@ -435,13 +463,13 @@ def section_agents(redact, include_memories):
     return "\n".join(lines) + "\n"
 
 
-def section_commands(redact):
+def section_commands(redact: Redact) -> str:
     cmd_dir = CLAUDE_DIR / "commands"
     if not cmd_dir.exists():
         return "## Slash commands\n\n_`~/.claude/commands/` not present_\n"
     entries = sorted(p for p in cmd_dir.iterdir() if not p.name.startswith("."))
     lines = [f"## Slash commands\n\n_{len(entries)} entries in `~/.claude/commands/`_\n"]
-    rows = []
+    rows: list[str] = []
     for e in entries:
         suffix = "/" if e.is_dir() else ""
         rows.append(f"- `{redact(e.name)}{suffix}`")
@@ -450,8 +478,8 @@ def section_commands(redact):
     return "\n".join(lines) + "\n"
 
 
-def section_memories(redact, include_memories):
-    targets = [
+def section_memories(redact: Redact, include_memories: bool) -> str:
+    targets: list[tuple[str, Path]] = [
         ("~/.claude/CLAUDE.md", CLAUDE_DIR / "CLAUDE.md"),
         ("~/.claude/AGENTS.md", CLAUDE_DIR / "AGENTS.md"),
         ("~/.claude/MEMORIES.md", CLAUDE_DIR / "MEMORIES.md"),
@@ -460,7 +488,7 @@ def section_memories(redact, include_memories):
         ("$PWD/AGENTS.md", Path.cwd() / "AGENTS.md"),
     ]
     lines = ["## Memory files\n"]
-    bodies = []
+    bodies: list[str] = []
     for label, path in targets:
         if not path.exists():
             lines.append(f"- `{label}`: _not present_")
@@ -473,8 +501,10 @@ def section_memories(redact, include_memories):
         n_lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         n_imports = len(re.findall(r"(?m)^@[\w./-]+", text))
         size = path.stat().st_size
-        lines.append(f"- `{label}`: {humansize(size)}, {n_lines} lines, "
-                     f"{n_imports} `@imports`")
+        lines.append(
+            f"- `{label}`: {humansize(size)}, {n_lines} lines, "
+            + f"{n_imports} `@imports`"
+        )
         if include_memories:
             bodies.append(f"### `{label}`\n\n"
                           + code_block(redact(text), "markdown"))
@@ -484,15 +514,15 @@ def section_memories(redact, include_memories):
     return "\n".join(lines) + "\n"
 
 
-def section_hooks(redact):
+def section_hooks(redact: Redact) -> str:
     settings_path = CLAUDE_DIR / "settings.json"
     if not settings_path.exists():
         return "## Hooks\n\n_no `~/.claude/settings.json`_\n"
     try:
-        data = json.loads(settings_path.read_text())
+        data = load_json_text(settings_path.read_text())
     except Exception as e:
         return f"## Hooks\n\n_parse error: {redact(str(e))}_\n"
-    hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
+    hooks = data.get("hooks") if isinstance(data, dict) else None
     if not isinstance(hooks, dict) or not hooks:
         return "## Hooks\n\n_no hooks configured_\n"
     lines = ["## Hooks\n",
@@ -502,7 +532,7 @@ def section_hooks(redact):
         if not isinstance(entries, list):
             lines.append(f"- `{event}`: malformed")
             continue
-        matchers = []
+        matchers: list[str] = []
         cmd_count = 0
         for ent in entries:
             if not isinstance(ent, dict):
@@ -512,12 +542,14 @@ def section_hooks(redact):
             n = len(hs) if isinstance(hs, list) else 0
             cmd_count += n
             matchers.append(f"`{redact(str(matcher))}`×{n}")
-        lines.append(f"- `{event}`: {len(entries)} matchers, "
-                     f"{cmd_count} commands — {', '.join(matchers)}")
+        lines.append(
+            f"- `{event}`: {len(entries)} matchers, "
+            + f"{cmd_count} commands — {', '.join(matchers)}"
+        )
     return "\n".join(lines) + "\n"
 
 
-def section_state_footprint(redact):
+def section_state_footprint(_redact: Redact) -> str:
     dirs = ["projects", "debug", "telemetry", "plans", "todos",
             "paste-cache", "file-history", "shell-snapshots",
             "sessions", "session-env", "tasks", "teams",
@@ -540,36 +572,43 @@ def section_state_footprint(redact):
     return "\n".join(lines) + "\n"
 
 
-def section_activity(redact):
+def section_activity(redact: Redact) -> str:
     lines = ["## Activity\n"]
     stats_path = CLAUDE_DIR / ".session-stats.json"
     if stats_path.exists():
         try:
-            data = json.loads(stats_path.read_text())
-            sessions = data.get("sessions", {})
+            data = load_json_text(stats_path.read_text())
+            sessions = data.get("sessions") if isinstance(data, dict) else None
             n_sessions = len(sessions) if isinstance(sessions, dict) else 0
-            now = datetime.now(timezone.utc).timestamp()
+            now = datetime.now(UTC).timestamp()
             recent = 0
-            tool_totals = {}
-            for s in (sessions.values() if isinstance(sessions, dict) else []):
+            tool_totals: dict[str, int] = {}
+            if not isinstance(sessions, dict):
+                session_values: tuple[JsonValue, ...] = ()
+            else:
+                session_values = tuple(sessions.values())
+            for s in session_values:
                 if not isinstance(s, dict):
                     continue
                 started = s.get("started_at") or s.get("updated_at") or 0
                 if isinstance(started, (int, float)) and now - started < 7 * 86400:
                     recent += 1
-                tc = s.get("tool_counts", {})
+                tc = s.get("tool_counts")
                 if isinstance(tc, dict):
                     for k, v in tc.items():
                         try:
-                            tool_totals[k] = tool_totals.get(k, 0) + int(v)
-                        except (TypeError, ValueError):
+                            count = int(cast(str | bytes | int | float, v))
+                            tool_totals[k] = tool_totals.get(k, 0) + count
+                        except TypeError, ValueError:
                             pass
             lines.append(f"- total sessions tracked: {n_sessions}")
             lines.append(f"- sessions in last 7 days: {recent}")
             if tool_totals:
                 top = sorted(tool_totals.items(), key=lambda x: -x[1])[:8]
-                lines.append("- top tools (by count): "
-                             + ", ".join(f"`{k}`:{v}" for k, v in top))
+                lines.append(
+                    "- top tools (by count): "
+                    + ", ".join(f"`{k}`:{v}" for k, v in top)
+                )
         except Exception as e:
             lines.append(f"- session stats parse error: {redact(str(e))}")
     else:
@@ -594,7 +633,7 @@ def section_activity(redact):
     return "\n".join(lines) + "\n"
 
 
-def section_recent_errors(redact, limit=20):
+def section_recent_errors(redact: Redact, limit: int = 20) -> str:
     tdir = CLAUDE_DIR / "telemetry"
     if not tdir.exists():
         return "## Recent errors\n\n_`~/.claude/telemetry/` not present_\n"
@@ -602,7 +641,7 @@ def section_recent_errors(redact, limit=20):
                    key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         return "## Recent errors\n\n_no `1p_failed_events.*.json` files_\n"
-    counts = {}
+    counts: dict[str, int] = {}
     sample_files = files[:8]
     total_lines = 0
     for f in sample_files:
@@ -611,22 +650,24 @@ def section_recent_errors(redact, limit=20):
                 for line in fh:
                     total_lines += 1
                     try:
-                        ev = json.loads(line)
+                        ev = load_json_text(line)
                     except Exception:
                         continue
-                    name = None
+                    name: JsonValue = None
                     if isinstance(ev, dict):
-                        name = (ev.get("event_data", {}) or {}).get("event_name") \
-                            if isinstance(ev.get("event_data"), dict) else None
+                        event_data = ev.get("event_data")
+                        name = event_data.get("event_name") \
+                            if isinstance(event_data, dict) else None
                         name = name or ev.get("event_name") or ev.get("event_type")
                     if name:
-                        counts[name] = counts.get(name, 0) + 1
+                        name_text = str(name)
+                        counts[name_text] = counts.get(name_text, 0) + 1
         except Exception:
             continue
     lines = [
         "## Recent errors\n",
         f"_event-name counts only, no payloads. Sampled {len(sample_files)} of "
-        f"{len(files)} `1p_failed_events.*.json` files ({total_lines} events)._\n",
+        + f"{len(files)} `1p_failed_events.*.json` files ({total_lines} events)._\n",
     ]
     if not counts:
         lines.append("_no recognized event names_")
@@ -639,7 +680,7 @@ def section_recent_errors(redact, limit=20):
     return "\n".join(lines) + "\n"
 
 
-def section_footer(redact):
+def section_footer(_redact: Redact) -> str:
     return (
         "## What this report does and doesn't redact\n\n"
         "**Redacted:** Anthropic / OpenAI / GitHub / AWS / JWT tokens, "
@@ -679,7 +720,7 @@ url: https://api.example.com/v1?api_key=zzz
 header: Authorization: Bearer abc.def.ghi
 """
 
-def self_test():
+def self_test() -> int:
     r = Redactor()
     fixture = SELF_TEST_FIXTURE.replace("__HOST__", r.hostname or "fakehost.local")
     out = r(fixture)
@@ -734,33 +775,64 @@ def self_test():
 
 # ---------------------------------------------------------------------- cli --
 
-def parse_args(argv):
+class Args(argparse.Namespace):
+    output: str | None = None
+    include_memories: bool = False
+    no_context: bool = False
+    no_save: bool = False
+    model: str = "haiku"
+    timeout: int = 45
+    self_test: bool = False
+    debug: bool = False
+
+
+def parse_args(argv: Sequence[str]) -> Args:
     p = argparse.ArgumentParser(
         prog="claude-diag",
         description="Generate a redacted Claude Code diagnostic report.",
     )
-    p.add_argument("--output", help="Path to save the report. "
-                   "Default: /tmp/claude-diag-<UTC-timestamp>.md")
-    p.add_argument("--include-memories", action="store_true",
-                   help="Dump memory & agent file bodies (still redacted).")
-    p.add_argument("--no-context", action="store_true",
-                   help="Skip the `claude -p /context` subprocess call.")
-    p.add_argument("--no-save", action="store_true",
-                   help="Print to stdout only; do not write a file.")
-    p.add_argument("--model", default="haiku",
-                   help="Model used for the /context call (default: haiku).")
-    p.add_argument("--timeout", type=int, default=45,
-                   help="Per-subprocess timeout in seconds (default: 45).")
-    p.add_argument("--self-test", action="store_true",
-                   help=argparse.SUPPRESS)
-    p.add_argument("--debug", action="store_true",
-                   help=argparse.SUPPRESS)
-    p.add_argument("--version", action="version",
-                   version=f"claude-diag {__version__}")
-    return p.parse_args(argv)
+    _ = p.add_argument(
+        "--output",
+        help="Path to save the report. "
+        + "Default: /tmp/claude-diag-<UTC-timestamp>.md",
+    )
+    _ = p.add_argument(
+        "--include-memories",
+        action="store_true",
+        help="Dump memory & agent file bodies (still redacted).",
+    )
+    _ = p.add_argument(
+        "--no-context",
+        action="store_true",
+        help="Skip the `claude -p /context` subprocess call.",
+    )
+    _ = p.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Print to stdout only; do not write a file.",
+    )
+    _ = p.add_argument(
+        "--model",
+        default="haiku",
+        help="Model used for the /context call (default: haiku).",
+    )
+    _ = p.add_argument(
+        "--timeout",
+        type=int,
+        default=45,
+        help="Per-subprocess timeout in seconds (default: 45).",
+    )
+    _ = p.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    _ = p.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+    _ = p.add_argument(
+        "--version",
+        action="version",
+        version=f"claude-diag {__version__}",
+    )
+    return p.parse_args(argv, namespace=Args())
 
 
-def build_report(args, redact):
+def build_report(args: Args, redact: Redact) -> str:
     sections = [
         section_header(),
         section_environment(redact, args.timeout),
@@ -783,7 +855,7 @@ def build_report(args, redact):
     return "\n".join(sections)
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if args.self_test:
         return self_test()
@@ -791,26 +863,29 @@ def main(argv=None):
     redact = Redactor()
     if args.debug:
         print("[debug] running self-test fixture first", file=sys.stderr)
-        self_test()
+        _ = self_test()
 
     report = build_report(args, redact)
 
     if not args.no_save:
         out_path = args.output
         if not out_path:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
             out_path = f"/tmp/claude-diag-{ts}.md"
         try:
-            Path(out_path).write_text(report)
-            print(f"[claude-diag] wrote {out_path} "
-                  f"({len(report):,} bytes)", file=sys.stderr)
+            _ = Path(out_path).write_text(report)
+            print(
+                f"[claude-diag] wrote {out_path} "
+                + f"({len(report):,} bytes)",
+                file=sys.stderr,
+            )
         except Exception as e:
             print(f"[claude-diag] failed to write {out_path}: {e}",
                   file=sys.stderr)
 
-    sys.stdout.write(report)
+    _ = sys.stdout.write(report)
     if not report.endswith("\n"):
-        sys.stdout.write("\n")
+        _ = sys.stdout.write("\n")
     return 0
 
 
