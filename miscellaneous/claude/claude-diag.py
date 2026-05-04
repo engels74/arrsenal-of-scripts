@@ -19,6 +19,8 @@ import socket
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,6 +38,9 @@ SCRIPT_URL = (
     "https://raw.githubusercontent.com/engels74/arrsenal-of-scripts/refs/heads/"
     "main/miscellaneous/claude/claude-diag.py"
 )
+PASTEMYST_API_URL = "https://paste.myst.rs/api/v3/pastes"
+PASTEMYST_WEB_URL = "https://paste.myst.rs"
+PASTEMYST_EXPIRIES = ("1h", "2h", "10h", "1d", "2d", "1w", "1m", "1y", "never")
 
 HOME = Path.home()
 USERNAME = HOME.name
@@ -924,6 +929,76 @@ def section_footer(
     )
 
 
+# ------------------------------------------------------------------ publish --
+
+class PublishError(Exception):
+    """Publish action failed after the local report was generated."""
+
+
+def build_pastemyst_payload(report: str, expires_in: str) -> JsonObject:
+    return {
+        "title": "Claude Code diagnostic report",
+        "expiresIn": expires_in,
+        "anonymous": True,
+        "private": False,
+        "pasties": [
+            {
+                "title": "claude-diag.md",
+                "content": report,
+                "language": "Markdown",
+            }
+        ],
+    }
+
+
+def parse_pastemyst_publish_url(raw: str) -> str:
+    try:
+        data = load_json_text(raw)
+    except Exception as e:
+        raise PublishError("PasteMyst response was not valid JSON") from e
+    if not isinstance(data, dict):
+        raise PublishError("PasteMyst response was not a JSON object")
+    paste_id = data.get("id")
+    if not isinstance(paste_id, str) or not paste_id:
+        raise PublishError("PasteMyst response did not include a paste id")
+    return f"{PASTEMYST_WEB_URL}/{paste_id}"
+
+
+def _snippet(raw: bytes, limit: int = 500) -> str:
+    text = raw.decode("utf-8", errors="replace").strip()
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def publish_to_pastemyst(report: str, expires_in: str) -> str:
+    payload = build_pastemyst_payload(report, expires_in)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        PASTEMYST_API_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": f"claude-diag/{__version__}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body_snippet = _snippet(e.read())
+        detail = f"HTTP {e.code}"
+        if body_snippet:
+            detail += f": {body_snippet}"
+        raise PublishError(f"PasteMyst publish failed ({detail})") from e
+    except urllib.error.URLError as e:
+        raise PublishError(f"PasteMyst publish failed: {e.reason}") from e
+    except OSError as e:
+        raise PublishError(f"PasteMyst publish failed: {e}") from e
+    return parse_pastemyst_publish_url(raw)
+
+
 # ----------------------------------------------------------------- self-test --
 
 SELF_TEST_FIXTURE = """
@@ -984,6 +1059,7 @@ def self_test() -> int:
     print("=== self-test fixture (redacted) ===")
     print(out)
     context_failures = _self_test_context()
+    publish_failures = _self_test_publish()
     print("=== checks ===")
     if failures:
         print(f"FAIL: leaked substrings: {failures}")
@@ -993,7 +1069,15 @@ def self_test() -> int:
         print(f"FAIL: dropped private IPs (should be kept): {private_dropped}")
     for failure in context_failures:
         print(f"FAIL: {failure}")
-    ok = not failures and not missing and not private_dropped and not context_failures
+    for failure in publish_failures:
+        print(f"FAIL: {failure}")
+    ok = (
+        not failures
+        and not missing
+        and not private_dropped
+        and not context_failures
+        and not publish_failures
+    )
     print("RESULT:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -1119,6 +1203,46 @@ def _self_test_context() -> list[str]:
     return failures
 
 
+def _self_test_publish() -> list[str]:
+    failures: list[str] = []
+    payload = build_pastemyst_payload("## redacted report\n", "1w")
+    if payload.get("anonymous") is not True:
+        failures.append("PasteMyst payload is not anonymous")
+    if payload.get("private") is not False:
+        failures.append("PasteMyst payload is not public")
+    if payload.get("expiresIn") != "1w":
+        failures.append("PasteMyst payload default expiry mismatch")
+    pasties = payload.get("pasties")
+    if not isinstance(pasties, list) or len(pasties) != 1:
+        failures.append("PasteMyst payload should contain exactly one pasty")
+    else:
+        pasty = pasties[0]
+        if not isinstance(pasty, dict):
+            failures.append("PasteMyst pasty is not a JSON object")
+        else:
+            if pasty.get("language") != "Markdown":
+                failures.append("PasteMyst pasty language is not Markdown")
+            if pasty.get("content") != "## redacted report\n":
+                failures.append("PasteMyst pasty content mismatch")
+
+    try:
+        url = parse_pastemyst_publish_url('{"id": "abc123"}')
+    except PublishError as e:
+        failures.append(f"PasteMyst success response was rejected: {e}")
+    else:
+        if url != "https://paste.myst.rs/abc123":
+            failures.append(f"PasteMyst success URL mismatch: {url}")
+
+    for raw in ("{}", "[]", "{bad json"):
+        try:
+            _ = parse_pastemyst_publish_url(raw)
+        except PublishError:
+            pass
+        else:
+            failures.append(f"PasteMyst invalid response was accepted: {raw}")
+    return failures
+
+
 # ---------------------------------------------------------------------- cli --
 
 class Args(argparse.Namespace):
@@ -1127,6 +1251,8 @@ class Args(argparse.Namespace):
     no_context: bool = False
     no_save: bool = False
     model: str | None = None
+    publish: bool = False
+    publish_expiry: str = "1w"
     timeout: int = 45
     self_test: bool = False
     debug: bool = False
@@ -1163,6 +1289,20 @@ def parse_args(argv: Sequence[str]) -> Args:
             "Optional model override for the /context call. "
             "Default: use Claude CLI settings."
         ),
+    )
+    _ = p.add_argument(
+        "--publish",
+        action="store_true",
+        help=(
+            "Upload the redacted Markdown report to PasteMyst as an anonymous "
+            "expiring public/unlisted-style share (not private)."
+        ),
+    )
+    _ = p.add_argument(
+        "--publish-expiry",
+        default="1w",
+        choices=PASTEMYST_EXPIRIES,
+        help="PasteMyst expiry for --publish (default: 1w).",
     )
     _ = p.add_argument(
         "--timeout",
@@ -1239,6 +1379,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ = sys.stdout.write(report)
     if not report.endswith("\n"):
         _ = sys.stdout.write("\n")
+
+    if args.publish:
+        try:
+            url = publish_to_pastemyst(report, args.publish_expiry)
+            print(f"[claude-diag] published: {url}", file=sys.stderr)
+        except PublishError as e:
+            print(f"[claude-diag] publish failed: {e}", file=sys.stderr)
+            return 1
     return 0
 
 
