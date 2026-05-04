@@ -38,7 +38,7 @@ SCRIPT_URL = (
     "https://raw.githubusercontent.com/engels74/arrsenal-of-scripts/refs/heads/"
     "main/miscellaneous/claude/claude-diag.py"
 )
-PASTEMYST_API_URL = "https://paste.myst.rs/api/v3/pastes"
+PASTEMYST_API_URL = "https://paste.myst.rs/api/v2/paste"
 PASTEMYST_WEB_URL = "https://paste.myst.rs"
 PASTEMYST_EXPIRIES = ("1h", "2h", "10h", "1d", "2d", "1w", "1m", "1y", "never")
 
@@ -830,7 +830,7 @@ def section_activity(redact: Redact) -> str:
                         try:
                             count = int(cast(str | bytes | int | float, v))
                             tool_totals[k] = tool_totals.get(k, 0) + count
-                        except TypeError, ValueError:
+                        except (TypeError, ValueError):
                             pass
             lines.append(f"- total sessions tracked: {n_sessions}")
             lines.append(f"- sessions in last 7 days: {recent}")
@@ -939,12 +939,10 @@ def build_pastemyst_payload(report: str, expires_in: str) -> JsonObject:
     return {
         "title": "Claude Code diagnostic report",
         "expiresIn": expires_in,
-        "anonymous": True,
-        "private": False,
         "pasties": [
             {
                 "title": "claude-diag.md",
-                "content": report,
+                "code": report,
                 "language": "Markdown",
             }
         ],
@@ -958,7 +956,9 @@ def parse_pastemyst_publish_url(raw: str) -> str:
         raise PublishError("PasteMyst response was not valid JSON") from e
     if not isinstance(data, dict):
         raise PublishError("PasteMyst response was not a JSON object")
-    paste_id = data.get("id")
+    paste_id = data.get("_id")
+    if not isinstance(paste_id, str) or not paste_id:
+        paste_id = data.get("id")
     if not isinstance(paste_id, str) or not paste_id:
         raise PublishError("PasteMyst response did not include a paste id")
     return f"{PASTEMYST_WEB_URL}/{paste_id}"
@@ -1206,10 +1206,10 @@ def _self_test_context() -> list[str]:
 def _self_test_publish() -> list[str]:
     failures: list[str] = []
     payload = build_pastemyst_payload("## redacted report\n", "1w")
-    if payload.get("anonymous") is not True:
-        failures.append("PasteMyst payload is not anonymous")
-    if payload.get("private") is not False:
-        failures.append("PasteMyst payload is not public")
+    if "anonymous" in payload:
+        failures.append("PasteMyst v2 payload should not include anonymous")
+    if "private" in payload:
+        failures.append("PasteMyst v2 payload should not include private")
     if payload.get("expiresIn") != "1w":
         failures.append("PasteMyst payload default expiry mismatch")
     pasties = payload.get("pasties")
@@ -1222,16 +1222,26 @@ def _self_test_publish() -> list[str]:
         else:
             if pasty.get("language") != "Markdown":
                 failures.append("PasteMyst pasty language is not Markdown")
-            if pasty.get("content") != "## redacted report\n":
-                failures.append("PasteMyst pasty content mismatch")
+            if "content" in pasty:
+                failures.append("PasteMyst v2 pasty should not include content")
+            if pasty.get("code") != "## redacted report\n":
+                failures.append("PasteMyst pasty code mismatch")
 
     try:
-        url = parse_pastemyst_publish_url('{"id": "abc123"}')
+        url = parse_pastemyst_publish_url('{"_id": "abc123"}')
     except PublishError as e:
         failures.append(f"PasteMyst success response was rejected: {e}")
     else:
         if url != "https://paste.myst.rs/abc123":
             failures.append(f"PasteMyst success URL mismatch: {url}")
+
+    try:
+        url = parse_pastemyst_publish_url('{"id": "fallback123"}')
+    except PublishError as e:
+        failures.append(f"PasteMyst fallback id response was rejected: {e}")
+    else:
+        if url != "https://paste.myst.rs/fallback123":
+            failures.append(f"PasteMyst fallback URL mismatch: {url}")
 
     for raw in ("{}", "[]", "{bad json"):
         try:
