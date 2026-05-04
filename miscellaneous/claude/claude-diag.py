@@ -18,7 +18,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, cast
@@ -123,6 +125,40 @@ class Redactor:
         return len(self._project_ids)
 
 
+@dataclass(frozen=True)
+class TokenUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+
+    @property
+    def total(self) -> int | None:
+        values = (
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+        )
+        if not any(v is not None for v in values):
+            return None
+        return sum(v or 0 for v in values)
+
+
+@dataclass(frozen=True)
+class ModelUsageSummary:
+    model: str
+    total_cost_usd: float | None
+    tokens: TokenUsage
+
+
+@dataclass(frozen=True)
+class UsageSummary:
+    total_cost_usd: float | None
+    tokens: TokenUsage
+    model_usage: tuple[ModelUsageSummary, ...] = ()
+
+
 # ----------------------------------------------------------------- helpers --
 
 def run(cmd: Sequence[str], timeout: int) -> tuple[str, int]:
@@ -200,6 +236,184 @@ def load_json_text(text: str) -> JsonValue:
     return cast(JsonValue, json.loads(text))
 
 
+def _number(value: object) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def _int_field(data: JsonObject, keys: Sequence[str]) -> int | None:
+    for key in keys:
+        value = _number(data.get(key))
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _float_field(data: JsonObject, keys: Sequence[str]) -> float | None:
+    for key in keys:
+        value = _number(data.get(key))
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _parse_token_usage(value: JsonValue) -> TokenUsage:
+    if not isinstance(value, dict):
+        return TokenUsage()
+    return TokenUsage(
+        input_tokens=_int_field(value, ("input_tokens", "inputTokens")),
+        output_tokens=_int_field(value, ("output_tokens", "outputTokens")),
+        cache_read_tokens=_int_field(
+            value,
+            (
+                "cache_read_input_tokens",
+                "cache_read_tokens",
+                "cacheReadInputTokens",
+                "cacheReadTokens",
+            ),
+        ),
+        cache_creation_tokens=_int_field(
+            value,
+            (
+                "cache_creation_input_tokens",
+                "cache_creation_tokens",
+                "cacheCreationInputTokens",
+                "cacheCreationTokens",
+            ),
+        ),
+    )
+
+
+def _usage_source(data: JsonObject) -> JsonValue:
+    usage = data.get("usage")
+    return usage if isinstance(usage, dict) else data
+
+
+def _parse_model_usage(value: JsonValue) -> tuple[ModelUsageSummary, ...]:
+    rows: list[ModelUsageSummary] = []
+    if isinstance(value, dict):
+        items: list[tuple[str, JsonValue]] = [
+            (str(model), model_data) for model, model_data in value.items()
+        ]
+    elif isinstance(value, list):
+        items = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            model = item.get("model") or item.get("name")
+            if isinstance(model, str):
+                items.append((model, item))
+    else:
+        return ()
+
+    for model, model_data in items:
+        if not isinstance(model_data, dict):
+            continue
+        cost = _float_field(
+            model_data,
+            ("total_cost_usd", "cost_usd", "totalCostUsd", "costUsd", "cost"),
+        )
+        tokens = _parse_token_usage(_usage_source(model_data))
+        if cost is None and tokens.total is None:
+            continue
+        rows.append(ModelUsageSummary(model, cost, tokens))
+    return tuple(rows)
+
+
+def parse_context_json(raw: str) -> tuple[str, UsageSummary | None]:
+    try:
+        data = load_json_text(raw)
+    except Exception:
+        return raw, None
+    if not isinstance(data, dict):
+        return raw, None
+    result = data.get("result")
+    if not isinstance(result, str):
+        return raw, None
+
+    total_cost_usd = _float_field(data, ("total_cost_usd", "totalCostUsd"))
+    tokens = _parse_token_usage(data.get("usage"))
+    model_usage = _parse_model_usage(data.get("modelUsage") or data.get("model_usage"))
+    if total_cost_usd is None and tokens.total is None and not model_usage:
+        return result, None
+    return result, UsageSummary(total_cost_usd, tokens, model_usage)
+
+
+def _format_cost(cost: float | None) -> str:
+    if cost is None:
+        return "cost unavailable"
+    if cost < 0.01:
+        amount = f"{cost:.4f}"
+    elif cost < 1:
+        amount = f"{cost:.3f}"
+    else:
+        amount = f"{cost:.2f}"
+    return f"~${amount}"
+
+
+def _format_cost_phrase(cost: float | None) -> str:
+    cost_text = _format_cost(cost)
+    return f"approx {cost_text}" if cost is not None else cost_text
+
+
+def _format_token_count(tokens: int) -> str:
+    if tokens < 1_000:
+        return f"{tokens:,}"
+    if tokens < 1_000_000:
+        return f"{tokens / 1_000:.1f}K"
+    return f"{tokens / 1_000_000:.1f}M"
+
+
+def _format_token_parts(tokens: TokenUsage) -> str:
+    parts: list[str] = []
+    if tokens.input_tokens is not None:
+        parts.append(f"input {_format_token_count(tokens.input_tokens)}")
+    if tokens.output_tokens is not None:
+        parts.append(f"output {_format_token_count(tokens.output_tokens)}")
+    if tokens.cache_read_tokens is not None:
+        parts.append(f"cache read {_format_token_count(tokens.cache_read_tokens)}")
+    if tokens.cache_creation_tokens is not None:
+        parts.append(f"cache write {_format_token_count(tokens.cache_creation_tokens)}")
+    return ", ".join(parts)
+
+
+def format_usage_summary(summary: UsageSummary | None) -> str:
+    if summary is None:
+        return "Run usage: not available."
+
+    total = summary.tokens.total
+    if total is None:
+        line = (
+            f"Run usage: {_format_cost_phrase(summary.total_cost_usd)}, "
+            + "tokens unavailable."
+        )
+    else:
+        details_text = _format_token_parts(summary.tokens)
+        detail_suffix = f" ({details_text})" if details_text else ""
+        line = (
+            f"Run usage: {_format_cost_phrase(summary.total_cost_usd)}, "
+            + f"{_format_token_count(total)} tokens{detail_suffix}."
+        )
+
+    if summary.model_usage:
+        model_parts: list[str] = []
+        for row in summary.model_usage[:3]:
+            row_total = row.tokens.total
+            if row_total is None:
+                model_parts.append(f"{row.model}: {_format_cost(row.total_cost_usd)}")
+            else:
+                model_parts.append(
+                    f"{row.model}: {_format_cost(row.total_cost_usd)}, "
+                    + f"{_format_token_count(row_total)} tokens"
+                )
+        more = "" if len(summary.model_usage) <= 3 else ", ..."
+        line += " Models: " + "; ".join(model_parts) + more + "."
+    return line
+
+
 # ---------------------------------------------------------------- sections --
 
 def section_header() -> str:
@@ -256,18 +470,24 @@ def section_claude(redact: Redact, timeout: int) -> str:
     return "## Claude Code\n\n" + "\n".join(lines) + "\n"
 
 
-def section_context(redact: Redact, model: str | None, timeout: int, skip: bool) -> str:
+def section_context(
+    redact: Redact,
+    model: str | None,
+    timeout: int,
+    skip: bool,
+) -> tuple[str, UsageSummary | None]:
     if skip:
-        return "## `/context` output\n\n_skipped via `--no-context`_\n"
+        return "## `/context` output\n\n_skipped via `--no-context`_\n", None
     cmd = [
-        "claude", "-p", "/context",
+        "claude", "-p", "/context", "--output-format", "json",
     ]
     if model:
         cmd.extend(("--model", model))
     out, code = run(cmd, timeout)
     if code != 0 and out in ("[not installed]", "[command timed out]"):
-        return f"## `/context` output\n\n_{out}_\n"
-    body = redact(out) if out else "_no output_"
+        return f"## `/context` output\n\n_{out}_\n", None
+    body, usage_summary = parse_context_json(out) if out else ("_no output_", None)
+    body = redact(body) if body else "_no output_"
     captured_cmd = redact(shlex.join(cmd))
     return (
         "## `/context` output\n\n"
@@ -275,7 +495,7 @@ def section_context(redact: Redact, model: str | None, timeout: int, skip: bool)
         + f"(exit code {code}). Paths and secrets redacted._\n\n"
         + code_block(body, "")
         + "\n"
-    )
+    ), usage_summary
 
 
 def _settings_summary(data: JsonObject, redact: Redact) -> str:
@@ -686,10 +906,19 @@ def section_recent_errors(redact: Redact, limit: int = 20) -> str:
     return "\n".join(lines) + "\n"
 
 
-def section_footer(_redact: Redact) -> str:
+def section_footer(
+    _redact: Redact,
+    usage_summary: UsageSummary | None,
+    context_skipped: bool,
+) -> str:
+    usage_line = (
+        "Run usage: not available (/context skipped)."
+        if context_skipped else format_usage_summary(usage_summary)
+    )
     return (
         "## About\n\n"
         f"_Generated by `claude-diag` v{__version__}._\n"
+        f"{usage_line}\n"
         f"Source: {SCRIPT_URL}\n\n"
         "© engels74\n"
     )
@@ -754,6 +983,7 @@ def self_test() -> int:
     print(fixture)
     print("=== self-test fixture (redacted) ===")
     print(out)
+    context_failures = _self_test_context()
     print("=== checks ===")
     if failures:
         print(f"FAIL: leaked substrings: {failures}")
@@ -761,9 +991,132 @@ def self_test() -> int:
         print(f"FAIL: missing redactions: {missing}")
     if private_dropped:
         print(f"FAIL: dropped private IPs (should be kept): {private_dropped}")
-    ok = not failures and not missing and not private_dropped
+    for failure in context_failures:
+        print(f"FAIL: {failure}")
+    ok = not failures and not missing and not private_dropped and not context_failures
     print("RESULT:", "OK" if ok else "FAIL")
     return 0 if ok else 1
+
+
+def _fake_claude_script() -> str:
+    return """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+log_path = os.environ["CLAUDE_DIAG_FAKE_LOG"]
+with open(log_path, "a", encoding="utf-8") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("fake-claude 1.0")
+    raise SystemExit(0)
+if args == ["mcp", "list"] or args == ["plugin", "list"]:
+    print("none")
+    raise SystemExit(0)
+
+mode = os.environ.get("CLAUDE_DIAG_FAKE_MODE", "valid")
+if mode == "malformed":
+    print("{bad json")
+elif mode == "missing":
+    print(json.dumps({"result": "missing metadata body"}))
+else:
+    print(json.dumps({
+        "result": "context body",
+        "total_cost_usd": 0.0032,
+        "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "cache_read_input_tokens": 38000,
+            "cache_creation_input_tokens": 2600
+        },
+        "modelUsage": {
+            "claude-sonnet": {
+                "total_cost_usd": 0.0032,
+                "input_tokens": 1200,
+                "output_tokens": 300,
+                "cache_read_input_tokens": 38000,
+                "cache_creation_input_tokens": 2600
+            }
+        }
+    }))
+"""
+
+
+def _read_fake_log(path: Path) -> list[list[str]]:
+    if not path.exists():
+        return []
+    rows: list[list[str]] = []
+    for line in path.read_text().splitlines():
+        data = load_json_text(line)
+        if isinstance(data, list) and all(isinstance(item, str) for item in data):
+            rows.append([str(item) for item in data])
+    return rows
+
+
+def _self_test_context() -> list[str]:
+    failures: list[str] = []
+    original_path = os.environ.get("PATH", "")
+    original_log = os.environ.get("CLAUDE_DIAG_FAKE_LOG")
+    original_mode = os.environ.get("CLAUDE_DIAG_FAKE_MODE")
+    r = Redactor()
+
+    with tempfile.TemporaryDirectory(prefix="claude-diag-test-") as tmp:
+        tmp_path = Path(tmp)
+        fake = tmp_path / "claude"
+        log = tmp_path / "claude.log"
+        _ = fake.write_text(_fake_claude_script())
+        fake.chmod(0o755)
+        os.environ["PATH"] = f"{tmp}{os.pathsep}{original_path}"
+        os.environ["CLAUDE_DIAG_FAKE_LOG"] = str(log)
+        try:
+            os.environ["CLAUDE_DIAG_FAKE_MODE"] = "valid"
+            context, usage = section_context(r, None, 5, False)
+            rows = _read_fake_log(log)
+            if rows[-1:] != [["-p", "/context", "--output-format", "json"]]:
+                failures.append(f"default /context command mismatch: {rows[-1:]}")
+            if "context body" not in context:
+                failures.append("valid JSON result was not used as /context body")
+            footer = section_footer(r, usage, False)
+            if "Run usage: approx ~$0.0032, 42.1K tokens" not in footer:
+                failures.append("valid JSON usage was not shown in footer")
+            if "claude-sonnet" not in footer:
+                failures.append("modelUsage breakdown was not shown in footer")
+
+            _ = section_context(r, "sonnet", 5, False)
+            rows = _read_fake_log(log)
+            expected_model_cmd = [
+                "-p", "/context", "--output-format", "json", "--model", "sonnet",
+            ]
+            if rows[-1:] != [expected_model_cmd]:
+                failures.append(f"model /context command mismatch: {rows[-1:]}")
+
+            os.environ["CLAUDE_DIAG_FAKE_MODE"] = "malformed"
+            context, usage = section_context(r, None, 5, False)
+            if "{bad json" not in context or usage is not None:
+                failures.append("malformed JSON did not fall back to raw output")
+
+            os.environ["CLAUDE_DIAG_FAKE_MODE"] = "missing"
+            context, usage = section_context(r, None, 5, False)
+            if "missing metadata body" not in context or usage is not None:
+                failures.append("missing cost/usage metadata was not handled cleanly")
+
+            footer = section_footer(r, None, True)
+            if "Run usage: not available (/context skipped)." not in footer:
+                failures.append("--no-context footer did not explain skipped usage")
+        finally:
+            os.environ["PATH"] = original_path
+            if original_log is None:
+                _ = os.environ.pop("CLAUDE_DIAG_FAKE_LOG", None)
+            else:
+                os.environ["CLAUDE_DIAG_FAKE_LOG"] = original_log
+            if original_mode is None:
+                _ = os.environ.pop("CLAUDE_DIAG_FAKE_MODE", None)
+            else:
+                os.environ["CLAUDE_DIAG_FAKE_MODE"] = original_mode
+
+    return failures
 
 
 # ---------------------------------------------------------------------- cli --
@@ -832,7 +1185,12 @@ def build_report(args: Args, redact: Redact) -> str:
         section_header(),
         section_environment(redact, args.timeout),
         section_claude(redact, args.timeout),
-        section_context(redact, args.model, args.timeout, args.no_context),
+    ]
+    context_section, usage_summary = section_context(
+        redact, args.model, args.timeout, args.no_context
+    )
+    sections.extend([
+        context_section,
         section_global_settings(redact),
         section_project_settings(redact),
         section_mcp(redact, args.timeout),
@@ -845,8 +1203,8 @@ def build_report(args: Args, redact: Redact) -> str:
         section_state_footprint(redact),
         section_activity(redact),
         section_recent_errors(redact),
-        section_footer(redact),
-    ]
+        section_footer(redact, usage_summary, args.no_context),
+    ])
     return "\n".join(sections)
 
 
