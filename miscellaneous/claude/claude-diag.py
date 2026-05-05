@@ -24,7 +24,7 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import ClassVar, cast
 from zoneinfo import ZoneInfo
 
@@ -70,18 +70,45 @@ class Redactor:
     )
     USERS_PATH: ClassVar[re.Pattern[str]] = re.compile(r"/Users/[^/\s:\"',]+")
     HOME_PATH: ClassVar[re.Pattern[str]] = re.compile(r"/home/[^/\s:\"',]+")
-    PROJECT_PATH: ClassVar[re.Pattern[str]] = re.compile(r"~/\.claude/projects/([^/\s\"',]+)")
+    PROJECT_ALIAS: ClassVar[re.Pattern[str]] = re.compile(r"\[PROJECT-\d+\]")
+    PROJECT_PATH: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:/Users/[^/\s:\"',`]+|/home/[^/\s:\"',`]+|~)"
+        r"/\.claude/projects/([^/\s\"',`)]+)"
+    )
+    HOMEISH_PATH: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:/Users/[^/\s:\"',`]+|/home/[^/\s:\"',`]+|~)"
+        r"(?:/[^\s\"'`,)\]]+)+"
+    )
 
     hostname: str
     short_hostname: str
+    home_path: str
+    cwd_path: str
+    cwd_home_path: str
+    _cwd_alias_prefixes: tuple[tuple[str, str], ...]
     _project_ids: dict[str, int]
+    _home_path_ids: dict[str, int]
     _next_id: int
+    _next_home_path_id: int
 
     def __init__(self) -> None:
         self.hostname = socket.gethostname() or ""
         self.short_hostname = self.hostname.split(".")[0] if self.hostname else ""
+        self.home_path = str(HOME)
+        self.cwd_path = str(Path.cwd())
+        self.cwd_home_path = self._home_relative_path(self.cwd_path)
+        cwd_alias_prefixes = {(self.cwd_path, "$PWD")}
+        if self.cwd_home_path:
+            cwd_alias_prefixes.add((f"~/{self.cwd_home_path}", "$PWD"))
+            if "/" in self.cwd_home_path:
+                cwd_alias_prefixes.add((self.cwd_home_path, "$PWD"))
+        self._cwd_alias_prefixes = tuple(
+            sorted(cwd_alias_prefixes, key=lambda item: len(item[0]), reverse=True)
+        )
         self._project_ids = {}
+        self._home_path_ids = {}
         self._next_id = 1
+        self._next_home_path_id = 1
 
     def _ip(self, m: re.Match[str]) -> str:
         ip = m.group(0)
@@ -100,10 +127,75 @@ class Redactor:
 
     def _project(self, m: re.Match[str]) -> str:
         name = m.group(1)
+        if self.PROJECT_ALIAS.fullmatch(name):
+            return f"~/.claude/projects/{name}"
         if name not in self._project_ids:
             self._project_ids[name] = self._next_id
             self._next_id += 1
         return f"~/.claude/projects/[PROJECT-{self._project_ids[name]}]"
+
+    def _home_relative_path(self, path: str) -> str:
+        if path == self.home_path:
+            return ""
+        prefix = f"{self.home_path}/"
+        if path.startswith(prefix):
+            return path[len(prefix):]
+        return ""
+
+    def _home_path_alias(self, parent: str) -> str:
+        if parent not in self._home_path_ids:
+            self._home_path_ids[parent] = self._next_home_path_id
+            self._next_home_path_id += 1
+        return f"[HOME-PATH-{self._home_path_ids[parent]}]"
+
+    def _homeish_path(self, m: re.Match[str]) -> str:
+        path = m.group(0)
+        trimmed = path.rstrip("/")
+        trailing = path[len(trimmed):]
+        rel = ""
+
+        if trimmed.startswith("~/"):
+            rel = trimmed[2:]
+            parent_key = f"~/{PurePosixPath(rel).parent}"
+        else:
+            parts = trimmed.split("/")
+            if len(parts) < 4:
+                return "~"
+            rel = "/".join(parts[3:])
+            parent_key = "/".join(parts[:-1])
+
+        if rel.startswith(".claude/projects/"):
+            return path
+        if rel.startswith(".claude/"):
+            return f"~/{rel}{trailing}"
+
+        basename = PurePosixPath(trimmed).name
+        return f"{self._home_path_alias(parent_key)}/{basename}{trailing}"
+
+    def _redact_paths(self, s: str) -> str:
+        s = self.PROJECT_PATH.sub(self._project, s)
+        for prefix, alias in self._cwd_alias_prefixes:
+            if prefix:
+                s = s.replace(prefix, alias)
+        s = self.HOMEISH_PATH.sub(self._homeish_path, s)
+        s = self.USERS_PATH.sub("~", s)
+        s = self.HOME_PATH.sub("~", s)
+        return self._guard_known_paths(s)
+
+    def _guard_known_paths(self, s: str) -> str:
+        replacements = [
+            (self.cwd_path, "$PWD"),
+            (f"~/{self.cwd_home_path}", "$PWD" if self.cwd_home_path else ""),
+            (self.home_path, "~"),
+        ]
+        if "/" in self.cwd_home_path:
+            replacements.append((self.cwd_home_path, "$PWD"))
+        for raw, alias in sorted(
+            replacements, key=lambda item: len(item[0]), reverse=True
+        ):
+            if raw and alias:
+                s = s.replace(raw, alias)
+        return s
 
     def __call__(self, s: object | None) -> str:
         if s is None:
@@ -120,9 +212,7 @@ class Redactor:
         if len(self.short_hostname) > 2 and self.short_hostname != self.hostname:
             s = re.sub(rf"\b{re.escape(self.short_hostname)}\b",
                        "[REDACTED:HOSTNAME]", s)
-        s = self.USERS_PATH.sub("~", s)
-        s = self.HOME_PATH.sub("~", s)
-        s = self.PROJECT_PATH.sub(self._project, s)
+        s = self._redact_paths(s)
         return s
 
     @property
@@ -1012,6 +1102,11 @@ ip-public: 8.8.8.8
 ip-private: 10.0.0.5 192.168.1.1 127.0.0.1
 host: __HOST__
 home: /Users/jdoe/code/foo /home/jdoe/bar
+cwd-abs: __CWD__/CLAUDE.md
+cwd-tilde: __CWD_TILDE__/CLAUDE.md
+claude-project-abs: __CLAUDE_PROJECT__/session.jsonl
+home-other: __HOME_OTHER__/private-token.txt
+claude-config: __CLAUDE_SETTINGS__
 project: ~/.claude/projects/-Users-jdoe--secret-thing/abc.jsonl
 url: https://api.example.com/v1?api_key=zzz
 header: Authorization: Bearer abc.def.ghi
@@ -1019,7 +1114,20 @@ header: Authorization: Bearer abc.def.ghi
 
 def self_test() -> int:
     r = Redactor()
-    fixture = SELF_TEST_FIXTURE.replace("__HOST__", r.hostname or "fakehost.local")
+    cwd_tilde = f"~/{r.cwd_home_path}" if r.cwd_home_path else r.cwd_path
+    encoded_project = r.cwd_path.replace("/", "-")
+    fixture = (
+        SELF_TEST_FIXTURE
+        .replace("__HOST__", r.hostname or "fakehost.local")
+        .replace("__CWD__", r.cwd_path)
+        .replace("__CWD_TILDE__", cwd_tilde)
+        .replace(
+            "__CLAUDE_PROJECT__",
+            f"{r.home_path}/.claude/projects/{encoded_project}",
+        )
+        .replace("__HOME_OTHER__", f"{r.home_path}/Downloads")
+        .replace("__CLAUDE_SETTINGS__", f"{r.home_path}/.claude/settings.json")
+    )
     out = r(fixture)
     forbidden = [
         "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -1032,9 +1140,15 @@ def self_test() -> int:
         "/Users/jdoe",
         "/home/jdoe",
         "-Users-jdoe--secret-thing",
+        r.home_path,
+        r.cwd_path,
+        cwd_tilde,
+        encoded_project,
         "api_key=zzz",
         "Bearer abc.def.ghi",
     ]
+    if r.cwd_home_path:
+        forbidden.append(r.cwd_home_path)
     if r.hostname:
         forbidden.append(r.hostname)
     failures = [s for s in forbidden if s in out]
@@ -1049,7 +1163,10 @@ def self_test() -> int:
         "[REDACTED:HOSTNAME]",
         "[REDACTED:QUERYSTRING]",
         "[REDACTED]",
-        "[PROJECT-",
+        "$PWD/CLAUDE.md",
+        "~/.claude/settings.json",
+        "~/.claude/projects/[PROJECT-1]/session.jsonl",
+        "[HOME-PATH-",
     ]
     missing = [s for s in expected if s not in out]
     keep = ["10.0.0.5", "192.168.1.1", "127.0.0.1"]
@@ -1355,7 +1472,7 @@ def build_report(args: Args, redact: Redact) -> str:
         section_recent_errors(redact),
         section_footer(redact, usage_summary, args.no_context),
     ])
-    return "\n".join(sections)
+    return redact("\n".join(sections))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
