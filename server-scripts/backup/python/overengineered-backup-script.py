@@ -54,6 +54,7 @@ import json
 import logging
 import os
 import pwd
+import re
 import shutil
 import signal
 import subprocess
@@ -1821,6 +1822,25 @@ def _identity_is_post_quantum(identity: Path) -> bool | None:
     return None
 
 
+def _age_version_supports_pq(age_path: str) -> bool | None:
+    """Return True if `age --version` reports >= 1.3.0 (post-quantum capable),
+    False if it reports an older version, or None if the version can't be
+    determined (--version failed, or the output wasn't parseable). age >= 1.3.0
+    is required to encrypt/decrypt post-quantum (AGE-SECRET-KEY-PQ-) identities."""
+    try:
+        result = run_command([age_path, "--version"], timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # age prints e.g. "v1.3.1" on stdout; fall back to stderr if stdout is empty.
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout or result.stderr)
+    if not match:
+        return None
+    version = tuple(int(part) for part in match.groups())
+    return version >= (1, 3, 0)
+
+
 def pre_flight_checks() -> None:
     """Perform pre-flight checks before starting backup.
 
@@ -1907,9 +1927,27 @@ def pre_flight_checks() -> None:
                     f"age identity file {identity} mixes post-quantum and classic "
                     f"identities; age refuses to encrypt to both (incompatible "
                     f"recipients), so new backups will FAIL. Remove the classic "
-                    f"AGE-SECRET-KEY-1... line (or regenerate with: "
-                    f"age-keygen -pq -o {identity})."
+                    f"AGE-SECRET-KEY-1... line - but keep a copy of that classic key "
+                    f"somewhere safe first, since you'll still need it to restore "
+                    f"older classic-encrypted backups - or regenerate with: "
+                    f"age-keygen -pq -o {identity}."
                 )
+            elif has_pq:
+                age_path = find_command("age")
+                supports = _age_version_supports_pq(age_path) if age_path else None
+                if supports is False:
+                    problem(
+                        f"age identity file {identity} is post-quantum, but the "
+                        f"installed age is older than 1.3.0 and cannot use it; the "
+                        f"backup would fail at the encryption stage. Upgrade age to "
+                        f">= 1.3.0."
+                    )
+                elif supports is None:
+                    log.warning(
+                        f"could not determine the installed age version; age >= 1.3.0 "
+                        f"is required to use the post-quantum identity {identity}. If "
+                        f"your age is older, backups will fail at encryption."
+                    )
             elif has_classic:
                 log.warning(
                     f"age identity file {identity} is a classic X25519 key, so new "

@@ -637,7 +637,62 @@ class TestIdentityClassification(ScriptTestCase):
         self.assertIs(mod._identity_is_post_quantum(key), True)
 
 
-@unittest.skipUnless(_age_supports_pq(), "age-keygen -pq (age >= 1.3.0) required")
+class TestAgeVersionSupportsPq(ScriptTestCase):
+    """_age_version_supports_pq gates the post-quantum pre-flight check: True
+    for age >= 1.3.0, False for older, None when the version is undeterminable
+    (so pre-flight fails open rather than blocking an oddly-versioned age).
+    Stubs run_command so no real age binary is needed."""
+
+    def _stub_version(self, *, stdout="", stderr="", returncode=0):
+        result = subprocess.CompletedProcess(
+            ["age", "--version"], returncode, stdout, stderr
+        )
+        original = mod.run_command
+        mod.run_command = lambda *_a, **_k: result
+        self.addCleanup(setattr, mod, "run_command", original)
+
+    def test_newer_patch_supported(self):
+        self._stub_version(stdout="v1.3.1\n")
+        self.assertIs(mod._age_version_supports_pq("age"), True)
+
+    def test_exact_threshold_supported(self):
+        self._stub_version(stdout="v1.3.0\n")
+        self.assertIs(mod._age_version_supports_pq("age"), True)
+
+    def test_older_minor_unsupported(self):
+        self._stub_version(stdout="v1.2.9\n")
+        self.assertIs(mod._age_version_supports_pq("age"), False)
+
+    def test_much_older_unsupported(self):
+        self._stub_version(stdout="v1.2.0\n")
+        self.assertIs(mod._age_version_supports_pq("age"), False)
+
+    def test_unparseable_version_is_none(self):
+        self._stub_version(stdout="(devel)\n")
+        self.assertIsNone(mod._age_version_supports_pq("age"))
+
+    def test_nonzero_returncode_is_none(self):
+        self._stub_version(stdout="v1.3.1\n", returncode=1)
+        self.assertIsNone(mod._age_version_supports_pq("age"))
+
+    def test_version_read_from_stderr_when_stdout_empty(self):
+        self._stub_version(stdout="", stderr="v1.3.1\n")
+        self.assertIs(mod._age_version_supports_pq("age"), True)
+
+    def test_command_error_is_none(self):
+        original = mod.run_command
+
+        def boom(*_a: object, **_k: object) -> object:
+            raise OSError("age missing")
+
+        mod.run_command = boom
+        self.addCleanup(setattr, mod, "run_command", original)
+        self.assertIsNone(mod._age_version_supports_pq("age"))
+
+
+@unittest.skipUnless(
+    _age_supports_pq() and AGE, "age + age-keygen -pq (age >= 1.3.0) required"
+)
 class TestPostQuantumRoundTrip(ScriptTestCase):
     """Confirm the encrypt/verify/restore round-trip works with a post-quantum
     (-pq) age identity - the recipient type the backup pipeline relies on."""
