@@ -172,6 +172,39 @@ class TestPreFlightDryRun(ScriptTestCase):
         self.assertTrue(mod.backup_state.errors)
         self.assertIn("Invalid docker shutdown_method", mod.backup_state.errors[0])
 
+    def test_mixed_identity_is_aggregated_not_raised(self):
+        # A post-quantum + classic mix makes age refuse to encrypt (incompatible
+        # recipients), so pre-flight must fail fast rather than warn-and-continue.
+        identity = self.tmp / "mixed.txt"
+        identity.write_text(
+            "AGE-SECRET-KEY-PQ-1EXAMPLEEXAMPLEEXAMPLE\n"
+            "AGE-SECRET-KEY-1EXAMPLEEXAMPLEEXAMPLE\n"
+        )
+        mod.config.age_identity_file = identity
+        mod.dry_run_mode = True
+        mod.pre_flight_checks()  # must not raise in dry-run mode
+        self.assertTrue(mod.backup_state.errors)
+        self.assertIn("mixes post-quantum and classic", mod.backup_state.errors[0])
+
+    def test_unreadable_identity_is_aggregated_not_raised(self):
+        # If the identity exists and is non-empty but can't be read (OSError ->
+        # _scan_identity_key_types returns None), pre-flight must fail fast
+        # instead of silently skipping the key-type check and only failing later
+        # in the age pipeline. Patch the scanner to force the None branch (the
+        # OSError -> None mapping itself is covered by
+        # TestIdentityClassification.test_unknown_when_unreadable), keeping this
+        # test deterministic whether or not it runs as root.
+        identity = self.tmp / "present-but-unreadable.txt"
+        identity.write_text("AGE-SECRET-KEY-PQ-1EXAMPLEEXAMPLEEXAMPLE\n")
+        original = mod._scan_identity_key_types
+        mod._scan_identity_key_types = lambda _identity: None
+        self.addCleanup(setattr, mod, "_scan_identity_key_types", original)
+        mod.config.age_identity_file = identity
+        mod.dry_run_mode = True
+        mod.pre_flight_checks()  # must not raise in dry-run mode
+        self.assertTrue(mod.backup_state.errors)
+        self.assertIn("could not be read", mod.backup_state.errors[0])
+
     def test_dry_run_problems_are_recorded_as_errors(self):
         # On any non-root test machine at least the root check fails, so the
         # dry run must record an error (=> non-zero exit) instead of only

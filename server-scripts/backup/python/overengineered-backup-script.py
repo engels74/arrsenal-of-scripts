@@ -1893,10 +1893,17 @@ def pre_flight_checks() -> None:
                 f"age identity file {identity} has loose permissions ({mode:o}); consider: chmod 600 {identity}"
             )
         key_types = _scan_identity_key_types(identity)
-        if key_types is not None:
+        if key_types is None:
+            problem(
+                f"age identity file {identity} exists but could not be read "
+                f"(permission or I/O error); cannot verify its key type, and "
+                f"the backup run would later fail when age tries to use it. Fix "
+                f"ownership/permissions so root can read it (e.g. chmod 600 {identity})."
+            )
+        else:
             has_pq, has_classic = key_types
             if has_pq and has_classic:
-                log.warning(
+                problem(
                     f"age identity file {identity} mixes post-quantum and classic "
                     f"identities; age refuses to encrypt to both (incompatible "
                     f"recipients), so new backups will FAIL. Remove the classic "
