@@ -2421,10 +2421,16 @@ def create_backup(backup_file: Path) -> bool:
         log.info(f"Backup created successfully: {format_bytes(final_size)}")
         return True
 
-    except (BackupError, OSError):
+    except (BackupError, OSError) as e:
         # Never leave a partial/corrupt archive behind.
         with contextlib.suppress(OSError):
             backup_file.unlink(missing_ok=True)
+        # OperationTimeout is a BackupError sibling, not a BackupCreationError;
+        # translate a create-time timeout so _run_backup() reports a clean
+        # stage-specific failure instead of an "unexpected critical error" dump
+        # (mirrors verify_backup, which re-raises timeouts as BackupVerificationError).
+        if isinstance(e, OperationTimeout):
+            raise BackupCreationError("Backup creation timed out") from e
         raise
 
 
@@ -2485,13 +2491,21 @@ def write_sha256_manifest(backup_file: Path) -> Path | None:
     if dry_run_mode:
         return None
 
-    h = hashlib.sha256()
-    with open(backup_file, "rb") as f:
-        while chunk := f.read(1024 * 1024):
-            h.update(chunk)
+    try:
+        h = hashlib.sha256()
+        with open(backup_file, "rb") as f:
+            while chunk := f.read(1024 * 1024):
+                h.update(chunk)
 
-    manifest = Path(str(backup_file) + ".sha256")
-    _ = manifest.write_text(f"{h.hexdigest()}  {backup_file.name}\n")
+        manifest = Path(str(backup_file) + ".sha256")
+        _ = manifest.write_text(f"{h.hexdigest()}  {backup_file.name}\n")
+    except OSError as e:
+        # A manifest is a convenience for checking remote copies; a write hiccup
+        # must not fail an already-verified backup or skip rotation/off-site sync.
+        log.warning(f"Could not write SHA-256 manifest for {backup_file.name}: {e}")
+        backup_state.add_warning(f"Could not write SHA-256 manifest: {e}")
+        return None
+
     log.info(f"SHA-256 manifest written: {manifest.name}")
 
     try:
