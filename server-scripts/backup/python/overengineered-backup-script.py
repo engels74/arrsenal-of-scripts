@@ -65,7 +65,16 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from types import FrameType
-from typing import IO, TYPE_CHECKING, BinaryIO, Callable, Self, TypedDict, cast
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    BinaryIO,
+    Callable,
+    Protocol,
+    Self,
+    TypedDict,
+    cast,
+)
 
 __version__ = "2.0.0"
 
@@ -86,8 +95,22 @@ except ImportError:
     UptimeKumaApi = None
     MaintenanceStrategy = None
 
-if TYPE_CHECKING:
-    from uptime_kuma_api import UptimeKumaApi as KumaApiT  # pyright: ignore[reportMissingImports]
+class KumaApi(Protocol):
+    """The subset of uptime_kuma_api.UptimeKumaApi this script relies on.
+
+    The library ships no type information, so we describe the surface we use
+    and cast the client to this protocol at the single construction point.
+    """
+
+    def login(self, username: str, password: str) -> object: ...
+    def disconnect(self) -> object: ...
+    def info(self) -> object: ...
+    def add_maintenance(self, **kwargs: object) -> object: ...
+    def get_monitors(self) -> object: ...
+    def add_monitor_maintenance(self, maintenance_id: int, monitors: object) -> object: ...
+    def get_status_pages(self) -> object: ...
+    def add_status_page_maintenance(self, maintenance_id: int, status_pages: object) -> object: ...
+    def delete_maintenance(self, maintenance_id: int) -> object: ...
 
 
 # -----------------------------------------------------------------------------
@@ -313,7 +336,7 @@ def _apply_toml(cfg: Config, data: dict[str, object], source: Path) -> None:
             attr = section_schema.get(key)
             if attr is None:
                 raise ConfigError(f"{source}: unknown key '{key}' in [{section}]")
-            default = getattr(cfg, attr)
+            default = cast(object, getattr(cfg, attr))
             if isinstance(default, Path):
                 if not isinstance(value, str):
                     raise ConfigError(f"{source}: [{section}] {key} must be a string path")
@@ -367,8 +390,7 @@ def load_config(path: Path | None) -> Config:
         raise ConfigError(f"Config file not found: {path}")
     else:
         log.info(
-            f"No config file at {DEFAULT_CONFIG_PATH}; using built-in defaults. "
-            f"Generate one with --print-default-config."
+            f"No config file at {DEFAULT_CONFIG_PATH}; using built-in defaults. Generate one with --print-default-config."
         )
 
     if kuma_password := os.environ.get(ENV_UPTIME_KUMA_PASSWORD):
@@ -599,7 +621,7 @@ class BackupState:
 # -----------------------------------------------------------------------------
 
 log = logging.getLogger(__name__)
-CONFIG = Config()
+config = Config()
 dry_run_mode = False
 backup_state = BackupState()
 shutdown_requested = False
@@ -786,8 +808,7 @@ def run_pipeline(
                 with contextlib.suppress(Exception):
                     _ = proc.wait(timeout=10)
             raise OperationTimeout(
-                f"Pipeline ({' | '.join(name for name, _ in stages)}) "
-                f"timed out after {timeout} seconds"
+                f"Pipeline ({' | '.join(name for name, _ in stages)}) timed out after {timeout} seconds"
             )
         finally:
             for proc in procs:
@@ -836,7 +857,7 @@ def check_shutdown_requested() -> None:
 def _watchdog_fired() -> None:
     global shutdown_requested
     log.critical(
-        f"Overall script timeout ({CONFIG.script_overall_timeout}s) exceeded! Aborting..."
+        f"Overall script timeout ({config.script_overall_timeout}s) exceeded! Aborting..."
     )
     shutdown_requested = True
     terminate_active_processes()
@@ -844,7 +865,7 @@ def _watchdog_fired() -> None:
 
 def start_watchdog() -> threading.Timer:
     """Enforce the overall script timeout."""
-    timer = threading.Timer(CONFIG.script_overall_timeout, _watchdog_fired)
+    timer = threading.Timer(config.script_overall_timeout, _watchdog_fired)
     timer.daemon = True
     timer.start()
     return timer
@@ -909,7 +930,7 @@ def is_stale_lock(lock_path: Path) -> bool:
         # fall back to an age check.
         try:
             age = time.time() - lock_path.stat().st_mtime
-            return age > CONFIG.script_overall_timeout
+            return age > config.script_overall_timeout
         except OSError:
             return True
 
@@ -941,16 +962,16 @@ def check_disk_space(path: Path) -> tuple[bool, str]:
         free_gb = free_bytes / (1024**3)
         free_percent = (free_bytes / total_bytes) * 100 if total_bytes > 0 else 0
 
-        if free_gb < CONFIG.min_free_space_gb:
+        if free_gb < config.min_free_space_gb:
             return (
                 False,
-                f"Insufficient disk space: {free_gb:.1f}GB free (minimum: {CONFIG.min_free_space_gb}GB)",
+                f"Insufficient disk space: {free_gb:.1f}GB free (minimum: {config.min_free_space_gb}GB)",
             )
 
-        if free_percent < CONFIG.min_free_space_percent:
+        if free_percent < config.min_free_space_percent:
             return (
                 False,
-                f"Insufficient disk space: {free_percent:.1f}% free (minimum: {CONFIG.min_free_space_percent}%)",
+                f"Insufficient disk space: {free_percent:.1f}% free (minimum: {config.min_free_space_percent}%)",
             )
 
         return True, f"Disk space OK: {free_gb:.1f}GB ({free_percent:.1f}%) free"
@@ -974,7 +995,7 @@ class UptimeKumaRetry:
     initial_delay: float
     max_delay: float
     backoff_factor: float
-    api: "KumaApiT | None"
+    api: KumaApi | None
 
     def __init__(
         self,
@@ -995,7 +1016,7 @@ class UptimeKumaRetry:
         self.backoff_factor = backoff_factor
         self.api = None
 
-    def connect(self) -> "KumaApiT":
+    def connect(self) -> KumaApi:
         """Establish connection to Uptime Kuma with retries."""
         if UptimeKumaApi is None:
             raise RuntimeError("Uptime Kuma API not available")
@@ -1007,12 +1028,13 @@ class UptimeKumaRetry:
             try:
                 if self.api is not None:
                     with contextlib.suppress(Exception):
-                        _ = self.api.disconnect()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                        _ = self.api.disconnect()
 
-                self.api = UptimeKumaApi(self.url, timeout=30)
-                _ = self.api.login(self.username, self.password)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                api = cast(KumaApi, UptimeKumaApi(self.url, timeout=30))
+                _ = api.login(self.username, self.password)
+                self.api = api
                 log.info("Successfully connected to Uptime Kuma")
-                return self.api
+                return api
 
             except Exception as e:
                 retry_count += 1
@@ -1031,7 +1053,7 @@ class UptimeKumaRetry:
 
         raise RuntimeError("Maximum connection retries exceeded")
 
-    def require_api(self) -> "KumaApiT":
+    def require_api(self) -> KumaApi:
         """Return the connected API client, connecting if needed."""
         if self.api is None:
             return self.connect()
@@ -1077,18 +1099,18 @@ class UptimeKumaRetry:
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         if self.api is not None:
             with contextlib.suppress(Exception):
-                _ = self.api.disconnect()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                _ = self.api.disconnect()
 
 
 def maintenance_id_file() -> Path:
     """State file for the active maintenance window. Lives under the log
     directory (not /tmp) so it survives a reboot mid-backup."""
-    return CONFIG.log_root_dir / "backup_maintenance_id.txt"
+    return config.log_root_dir / "backup_maintenance_id.txt"
 
 
 def create_backup_maintenance_window() -> int | None:
     """Create a maintenance window for the backup process."""
-    if not CONFIG.uptime_kuma_enabled or dry_run_mode:
+    if not config.uptime_kuma_enabled or dry_run_mode:
         if dry_run_mode:
             log.info("DRY RUN: Skipping maintenance window creation.")
         return None
@@ -1111,15 +1133,12 @@ def create_backup_maintenance_window() -> int | None:
         log.info("Creating Uptime Kuma maintenance window for backup...")
 
         with UptimeKumaRetry(
-            CONFIG.uptime_kuma_url,
-            CONFIG.uptime_kuma_username,
-            CONFIG.uptime_kuma_password,
+            config.uptime_kuma_url,
+            config.uptime_kuma_username,
+            config.uptime_kuma_password,
         ) as kuma:
             api = kuma.require_api()
-            server_info = cast(
-                ServerInfo,
-                cast(object, kuma.retry_operation(api.info)),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-            )
+            server_info = cast(ServerInfo, kuma.retry_operation(api.info))
             raw_timezone = str(server_info["serverTimezone"])
             try:
                 server_timezone = str(ZoneInfo(raw_timezone))
@@ -1132,61 +1151,54 @@ def create_backup_maintenance_window() -> int | None:
 
             maintenance = cast(
                 MaintenanceResponse,
-                cast(
-                    object,
-                    kuma.retry_operation(
-                        api.add_maintenance,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                        title="Server Backup in Progress",
-                        description="Automated server backup is currently running. Services may be temporarily unavailable.",
-                        strategy=MaintenanceStrategy.MANUAL,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                        active=True,
-                        timezoneOption=server_timezone,
-                    ),
+                kuma.retry_operation(
+                    api.add_maintenance,
+                    title="Server Backup in Progress",
+                    description="Automated server backup is currently running. Services may be temporarily unavailable.",
+                    strategy=MaintenanceStrategy.MANUAL,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                    active=True,
+                    timezoneOption=server_timezone,
                 ),
             )
 
             maintenance_id = int(maintenance["maintenanceID"])
             log.info(f"Maintenance window created with ID: {maintenance_id}")
 
-            monitors = cast(
-                MonitorList,
-                cast(object, kuma.retry_operation(api.get_monitors)),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-            )
+            monitors = cast(MonitorList, kuma.retry_operation(api.get_monitors))
             monitor_ids: MonitorIdList = [{"id": monitor["id"]} for monitor in monitors]
 
             if monitor_ids:
                 log.info(f"Adding {len(monitor_ids)} monitors to maintenance window")
-                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
-                    api.add_monitor_maintenance,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                _ = kuma.retry_operation(
+                    api.add_monitor_maintenance,
                     maintenance_id,
                     monitor_ids,
                 )
                 log.info("Monitors added to maintenance window")
 
             status_pages = cast(
-                StatusPageList,
-                cast(object, kuma.retry_operation(api.get_status_pages)),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                StatusPageList, kuma.retry_operation(api.get_status_pages)
             )
             if status_page := next(
                 (
                     page
                     for page in status_pages
-                    if page["slug"] == CONFIG.uptime_kuma_status_page_slug
+                    if page["slug"] == config.uptime_kuma_status_page_slug
                 ),
                 None,
             ):
                 log.info(
-                    f"Adding status page '{CONFIG.uptime_kuma_status_page_slug}' to maintenance window"
+                    f"Adding status page '{config.uptime_kuma_status_page_slug}' to maintenance window"
                 )
-                _ = kuma.retry_operation(  # pyright: ignore[reportUnknownVariableType]
-                    api.add_status_page_maintenance,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                _ = kuma.retry_operation(
+                    api.add_status_page_maintenance,
                     maintenance_id,
                     [{"id": status_page["id"]}],
                 )
                 log.info("Status page added to maintenance window")
             else:
                 log.warning(
-                    f"Status page '{CONFIG.uptime_kuma_status_page_slug}' not found"
+                    f"Status page '{config.uptime_kuma_status_page_slug}' not found"
                 )
 
             try:
@@ -1205,7 +1217,7 @@ def create_backup_maintenance_window() -> int | None:
 
 def remove_backup_maintenance_window() -> None:
     """Remove the backup maintenance window."""
-    if not CONFIG.uptime_kuma_enabled or dry_run_mode:
+    if not config.uptime_kuma_enabled or dry_run_mode:
         if dry_run_mode:
             log.info("DRY RUN: Skipping maintenance window removal.")
         return
@@ -1229,20 +1241,14 @@ def remove_backup_maintenance_window() -> None:
         log.info(f"Removing maintenance window with ID: {maintenance_id}")
 
         with UptimeKumaRetry(
-            CONFIG.uptime_kuma_url,
-            CONFIG.uptime_kuma_username,
-            CONFIG.uptime_kuma_password,
+            config.uptime_kuma_url,
+            config.uptime_kuma_username,
+            config.uptime_kuma_password,
         ) as kuma:
             api = kuma.require_api()
             result = cast(
                 DeleteMaintenanceResponse,
-                cast(
-                    object,
-                    kuma.retry_operation(
-                        api.delete_maintenance,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                        maintenance_id,
-                    ),
-                ),
+                kuma.retry_operation(api.delete_maintenance, maintenance_id),
             )
             log.info(f"Maintenance window deleted. Result: {result}")
 
@@ -1291,7 +1297,7 @@ def send_discord_notification(
     status: str, message: str, color: int, title_override: str | None = None
 ) -> None:
     """Sends a formatted notification to the configured Discord webhook."""
-    if not CONFIG.discord_webhook_url or requests is None:
+    if not config.discord_webhook_url or requests is None:
         return
     if dry_run_mode:
         log.info("DRY RUN: Skipping Discord notification.")
@@ -1299,8 +1305,8 @@ def send_discord_notification(
 
     title = title_override or f"Local Backup Status: {status}"
     payload = {
-        "username": CONFIG.discord_username,
-        "avatar_url": CONFIG.discord_avatar_url,
+        "username": config.discord_username,
+        "avatar_url": config.discord_avatar_url,
         "embeds": [
             {
                 "title": title,
@@ -1316,7 +1322,7 @@ def send_discord_notification(
     for attempt in range(3):
         try:
             response = requests.post(
-                CONFIG.discord_webhook_url, json=payload, timeout=10
+                config.discord_webhook_url, json=payload, timeout=10
             )
             response.raise_for_status()
             return
@@ -1329,12 +1335,12 @@ def send_discord_notification(
 
 def upload_log_to_privatebin(log_file: Path | None) -> str | None:
     """Uploads the log file to PrivateBin and returns the URL."""
-    if not CONFIG.privatebin_enabled or dry_run_mode or log_file is None:
+    if not config.privatebin_enabled or dry_run_mode or log_file is None:
         return None
-    privatebin_cmd = find_command(CONFIG.privatebin_cli_path)
+    privatebin_cmd = find_command(config.privatebin_cli_path)
     if not privatebin_cmd:
         log.warning(
-            f"PrivateBin CLI not found at '{CONFIG.privatebin_cli_path}'. Skipping log upload."
+            f"PrivateBin CLI not found at '{config.privatebin_cli_path}'. Skipping log upload."
         )
         return None
 
@@ -1398,7 +1404,7 @@ def run_rclone_sync_with_retry(log_file: Path | None) -> dict[str, str | int]:
     """Runs the rclone sync process with retry logic."""
     log.info("--- Starting Rclone Off-site Upload ---")
 
-    if not CONFIG.rclone_enabled:
+    if not config.rclone_enabled:
         log.info("Rclone upload is disabled. Skipping.")
         return {"status": "skipped"}
 
@@ -1407,7 +1413,7 @@ def run_rclone_sync_with_retry(log_file: Path | None) -> dict[str, str | int]:
         return {"status": "skipped"}
 
     start_time = time.monotonic()
-    retry_delay = CONFIG.rclone_retry_delay
+    retry_delay = config.rclone_retry_delay
     last_error: str = ""
 
     # Send start notification
@@ -1416,8 +1422,8 @@ def run_rclone_sync_with_retry(log_file: Path | None) -> dict[str, str | int]:
         f"**Status Details**\n"
         f"Beginning sync operation...\n\n"
         f"**Sync Info**\n"
-        f"Source: `{CONFIG.backup_root_dir}`\n"
-        f"Destination: `{CONFIG.rclone_remote_dest}`\n\n"
+        f"Source: `{config.backup_root_dir}`\n"
+        f"Destination: `{config.rclone_remote_dest}`\n\n"
         f"**Timestamp**\n"
         f"{start_timestamp}"
     )
@@ -1428,14 +1434,14 @@ def run_rclone_sync_with_retry(log_file: Path | None) -> dict[str, str | int]:
         title_override="Rclone Sync Status: Started",
     )
 
-    for attempt in range(1, CONFIG.rclone_max_retries + 1):
+    for attempt in range(1, config.rclone_max_retries + 1):
         check_shutdown_requested()
 
         if attempt > 1:
-            log.info(f"Rclone retry attempt {attempt}/{CONFIG.rclone_max_retries}")
+            log.info(f"Rclone retry attempt {attempt}/{config.rclone_max_retries}")
             log.info(f"Waiting {retry_delay} seconds before retry...")
             time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, CONFIG.rclone_retry_max_delay)
+            retry_delay = min(retry_delay * 2, config.rclone_retry_max_delay)
 
         try:
             result = _execute_rclone_sync(log_file)
@@ -1457,7 +1463,7 @@ def run_rclone_sync_with_retry(log_file: Path | None) -> dict[str, str | int]:
 
         except OperationTimeout:
             log.error(f"Rclone attempt {attempt} timed out")
-            last_error = f"Operation timed out after {CONFIG.rclone_overall_timeout} seconds"
+            last_error = f"Operation timed out after {config.rclone_overall_timeout} seconds"
 
         except Exception as e:
             log.error(f"Rclone attempt {attempt} failed with exception: {e}")
@@ -1469,12 +1475,12 @@ def run_rclone_sync_with_retry(log_file: Path | None) -> dict[str, str | int]:
         "status": "failed",
         "exit_code": 1,
         "duration": format_duration(duration),
-        "attempts": CONFIG.rclone_max_retries,
-        "last_error": f"All {CONFIG.rclone_max_retries} attempts failed. Last error: {last_error}",
+        "attempts": config.rclone_max_retries,
+        "last_error": f"All {config.rclone_max_retries} attempts failed. Last error: {last_error}",
         "transferred": "0 files, 0 B",
         "transferred_files": "0 files",
         "transferred_data": "0 B",
-        "errors": str(CONFIG.rclone_max_retries),
+        "errors": str(config.rclone_max_retries),
         "checks": "0 files, 0 B",
         "checks_count": 0,
         "total_checks": 0,
@@ -1517,10 +1523,10 @@ def _execute_rclone_sync(log_file: Path | None) -> dict[str, str | int]:
     command = [
         resolve_command("rclone"),
         "sync",
-        str(CONFIG.backup_root_dir),
-        CONFIG.rclone_remote_dest,
+        str(config.backup_root_dir),
+        config.rclone_remote_dest,
         "--create-empty-src-dirs",
-        f"--bwlimit={CONFIG.rclone_bandwidth_limit}",
+        f"--bwlimit={config.rclone_bandwidth_limit}",
         "--retries",
         "3",
         "--retries-sleep",
@@ -1542,22 +1548,22 @@ def _execute_rclone_sync(log_file: Path | None) -> dict[str, str | int]:
     ]
 
     filter_file: Path | None = None
-    if CONFIG.rclone_filters:
+    if config.rclone_filters:
         with tempfile.NamedTemporaryFile(
             mode="w", delete=False, suffix=".txt", prefix="rclone-filters-"
         ) as f:
             filter_file = Path(f.name)
-            _ = f.write("\n".join(CONFIG.rclone_filters))
+            _ = f.write("\n".join(config.rclone_filters))
         command.append(f"--filter-from={filter_file}")
 
     log.info(f"Running rclone command: {' '.join(command)}")
 
     try:
-        process = run_command(command, timeout=CONFIG.rclone_overall_timeout)
+        process = run_command(command, timeout=config.rclone_overall_timeout)
         exit_code = process.returncode
     except subprocess.TimeoutExpired:
         raise OperationTimeout(
-            f"Rclone operation timed out after {CONFIG.rclone_overall_timeout} seconds"
+            f"Rclone operation timed out after {config.rclone_overall_timeout} seconds"
         )
     finally:
         if filter_file:
@@ -1641,57 +1647,53 @@ def _execute_rclone_sync(log_file: Path | None) -> dict[str, str | int]:
 def _validate_integrations() -> None:
     """Disable integrations whose configuration is incomplete, instead of
     letting them burn through retry ladders at runtime."""
-    if CONFIG.uptime_kuma_enabled:
+    if config.uptime_kuma_enabled:
         missing = [
             name
             for name, value in (
-                ("url", CONFIG.uptime_kuma_url),
-                ("username", CONFIG.uptime_kuma_username),
-                ("password", CONFIG.uptime_kuma_password),
+                ("url", config.uptime_kuma_url),
+                ("username", config.uptime_kuma_username),
+                ("password", config.uptime_kuma_password),
             )
             if not value
         ]
         if missing:
             log.warning(
-                f"Uptime Kuma maintenance is enabled but missing: {', '.join(missing)}. "
-                f"Disabling for this run. (Hint: set {ENV_UPTIME_KUMA_PASSWORD} or the config file.)"
+                f"Uptime Kuma maintenance is enabled but missing: {', '.join(missing)}. Disabling for this run. (Hint: set {ENV_UPTIME_KUMA_PASSWORD} or the config file.)"
             )
-            CONFIG.uptime_kuma_enabled = False
+            config.uptime_kuma_enabled = False
         elif UptimeKumaApi is None:
             log.warning(
-                "Uptime Kuma maintenance is enabled but the 'uptime-kuma-api' package "
-                "is not installed. Disabling for this run."
+                "Uptime Kuma maintenance is enabled but the 'uptime-kuma-api' package is not installed. Disabling for this run."
             )
-            CONFIG.uptime_kuma_enabled = False
+            config.uptime_kuma_enabled = False
 
-    if CONFIG.discord_webhook_url and requests is None:
+    if config.discord_webhook_url and requests is None:
         log.warning(
-            "Discord webhook is configured but the 'requests' package is not "
-            "installed. Notifications disabled for this run."
+            "Discord webhook is configured but the 'requests' package is not installed. Notifications disabled for this run."
         )
-        CONFIG.discord_webhook_url = ""
-    elif not CONFIG.discord_webhook_url:
+        config.discord_webhook_url = ""
+    elif not config.discord_webhook_url:
         log.info("Discord webhook not configured; notifications disabled.")
 
-    if CONFIG.privatebin_enabled and not find_command(CONFIG.privatebin_cli_path):
+    if config.privatebin_enabled and not find_command(config.privatebin_cli_path):
         log.warning(
-            f"PrivateBin CLI '{CONFIG.privatebin_cli_path}' not found. "
-            "Log uploads disabled for this run."
+            f"PrivateBin CLI '{config.privatebin_cli_path}' not found. Log uploads disabled for this run."
         )
-        CONFIG.privatebin_enabled = False
+        config.privatebin_enabled = False
 
 
 def _report_backup_sources() -> None:
     """Dry-run helper: report the state of every configured backup source."""
     log.info("Backup sources:")
-    for src in CONFIG.backup_sources:
+    for src in config.backup_sources:
         if not src.exists():
             log.warning(f"  MISSING   {src}")
         elif not os.access(src, os.R_OK):
             log.warning(f"  UNREADABLE {src}")
         else:
             log.info(f"  ok        {src}")
-    for excl in CONFIG.backup_exclusions:
+    for excl in config.backup_exclusions:
         log.info(f"  excluded  {excl}{'' if excl.exists() else ' (not present)'}")
 
 
@@ -1715,15 +1717,15 @@ def pre_flight_checks() -> None:
     if os.geteuid() != 0:
         problem("This script must be run as root.")
 
-    if CONFIG.compression_tool not in ("gzip", "pigz"):
+    if config.compression_tool not in ("gzip", "pigz"):
         raise PreFlightError(
-            f"Invalid compression_tool: {CONFIG.compression_tool}. Must be 'gzip' or 'pigz'."
+            f"Invalid compression_tool: {config.compression_tool}. Must be 'gzip' or 'pigz'."
         )
 
-    deps = ["tar", CONFIG.compression_tool, "age"]
-    if CONFIG.docker_enabled:
+    deps = ["tar", config.compression_tool, "age"]
+    if config.docker_enabled:
         deps.append("docker")
-    if CONFIG.rclone_enabled:
+    if config.rclone_enabled:
         deps.append("rclone")
 
     for dep in deps:
@@ -1735,35 +1737,31 @@ def pre_flight_checks() -> None:
             elif dep == "age":
                 hint = " (install with: brew install age / sudo apt-get install age)"
             problem(
-                f"Missing required dependency: {dep}{hint}. Searched PATH and "
-                f"brew locations: {', '.join(str(d) for d in _command_search_dirs())}"
+                f"Missing required dependency: {dep}{hint}. Searched PATH and brew locations: {', '.join(str(d) for d in _command_search_dirs())}"
             )
         else:
             log.info(f"Dependency '{dep}' resolved to: {resolved}")
 
-    identity = CONFIG.age_identity_file
+    identity = config.age_identity_file
     if not identity.is_file() or identity.stat().st_size == 0:
         problem(
-            f"age identity file not found or empty: {identity}. "
-            f"Create it with: age-keygen -o {identity} && chmod 600 {identity} "
-            f"- and KEEP A COPY OFF THIS MACHINE (lost key = unreadable backups)."
+            f"age identity file not found or empty: {identity}. Create it with: age-keygen -o {identity} && chmod 600 {identity} - and KEEP A COPY OFF THIS MACHINE (lost key = unreadable backups)."
         )
     else:
         mode = identity.stat().st_mode & 0o777
         if mode & 0o077:
             log.warning(
-                f"age identity file {identity} has loose permissions "
-                f"({mode:o}); consider: chmod 600 {identity}"
+                f"age identity file {identity} has loose permissions ({mode:o}); consider: chmod 600 {identity}"
             )
 
     try:
-        _ = pwd.getpwnam(CONFIG.backup_user)
-        _ = grp.getgrnam(CONFIG.backup_group)
+        _ = pwd.getpwnam(config.backup_user)
+        _ = grp.getgrnam(config.backup_group)
     except KeyError as e:
         problem(f"Backup user/group not found: {e}")
 
     space_ok, space_msg = check_disk_space(
-        CONFIG.backup_root_dir if CONFIG.backup_root_dir.exists() else Path("/")
+        config.backup_root_dir if config.backup_root_dir.exists() else Path("/")
     )
     if not space_ok:
         problem(space_msg)
@@ -1791,19 +1789,19 @@ def pre_flight_checks() -> None:
 
 def get_docker_compose_files() -> tuple[list[Path], list[Path]]:
     """Get Docker compose files, separating Plex from others."""
-    if not CONFIG.docker_stacks_dir.is_dir():
-        log.warning(f"Docker stacks directory not found at {CONFIG.docker_stacks_dir}")
+    if not config.docker_stacks_dir.is_dir():
+        log.warning(f"Docker stacks directory not found at {config.docker_stacks_dir}")
         return [], []
 
     all_files = sorted(
-        list(CONFIG.docker_stacks_dir.glob("**/compose.yaml"))
-        + list(CONFIG.docker_stacks_dir.glob("**/compose.yml"))
+        list(config.docker_stacks_dir.glob("**/compose.yaml"))
+        + list(config.docker_stacks_dir.glob("**/compose.yml"))
     )
-    plex_files = [CONFIG.plex_compose_file] if CONFIG.plex_compose_file.is_file() else []
+    plex_files = [config.plex_compose_file] if config.plex_compose_file.is_file() else []
     if not plex_files:
-        log.warning(f"Plex compose file not found: {CONFIG.plex_compose_file}")
+        log.warning(f"Plex compose file not found: {config.plex_compose_file}")
     other_files = [
-        f for f in all_files if f.resolve() != CONFIG.plex_compose_file.resolve()
+        f for f in all_files if f.resolve() != config.plex_compose_file.resolve()
     ]
     log.info(f"Found {len(all_files)} total Docker compose files.")
     return plex_files, other_files
@@ -1860,12 +1858,12 @@ def _compose_action(file: Path, action: str) -> bool:
     """Run a single `docker compose` stop/start for one compose file."""
     command = [resolve_command("docker"), "compose", "-f", str(file)]
     if action == "stop":
-        command.append(CONFIG.docker_shutdown_method)
+        command.append(config.docker_shutdown_method)
     else:
         command.extend(["up", "-d"])
 
     try:
-        result = run_command(command, timeout=CONFIG.docker_compose_timeout)
+        result = run_command(command, timeout=config.docker_compose_timeout)
     except subprocess.TimeoutExpired:
         log.error(f"Timeout while trying to {action} services for {file}")
         return False
@@ -1884,7 +1882,7 @@ def manage_docker_services(compose_files: list[Path], action: str) -> bool:
 
     Stops run sequentially; starts run concurrently (a settle delay is
     applied once per batch instead of per stack)."""
-    if not CONFIG.docker_enabled or dry_run_mode:
+    if not config.docker_enabled or dry_run_mode:
         return True
 
     existing = [f for f in compose_files if f.is_file()]
@@ -1899,12 +1897,16 @@ def manage_docker_services(compose_files: list[Path], action: str) -> bool:
     if action == "stop":
         results = [_compose_action(f, action) for f in existing]
     else:
+
+        def start_stack(file: Path) -> bool:
+            return _compose_action(file, action)
+
         with ThreadPoolExecutor(max_workers=4) as executor:
-            results = list(executor.map(lambda f: _compose_action(f, action), existing))
+            results = list(executor.map(start_stack, existing))
         log.info(
-            f"Waiting {CONFIG.docker_start_settle_delay}s for services to settle..."
+            f"Waiting {config.docker_start_settle_delay}s for services to settle..."
         )
-        time.sleep(CONFIG.docker_start_settle_delay)
+        time.sleep(config.docker_start_settle_delay)
 
     return all(results)
 
@@ -1919,8 +1921,7 @@ def force_stop_containers(container_ids: list[str], timeout: int = 30) -> None:
         return
 
     log.warning(
-        f"Force stopping {len(container_ids)} container(s): "
-        f"{_describe_containers(container_ids)}"
+        f"Force stopping {len(container_ids)} container(s): {_describe_containers(container_ids)}"
     )
 
     try:
@@ -1944,8 +1945,7 @@ def force_kill_containers(container_ids: list[str]) -> None:
         return
 
     log.warning(
-        f"Force killing {len(container_ids)} container(s): "
-        f"{_describe_containers(container_ids)}"
+        f"Force killing {len(container_ids)} container(s): {_describe_containers(container_ids)}"
     )
 
     try:
@@ -1974,7 +1974,7 @@ def ensure_all_containers_stopped(
     Returns:
         True if all containers are stopped, False otherwise.
     """
-    if not CONFIG.docker_enabled:
+    if not config.docker_enabled:
         log.info("Docker stop/start is disabled. Skipping container shutdown.")
         return True
 
@@ -1983,21 +1983,21 @@ def ensure_all_containers_stopped(
         return True
 
     if timeout is None:
-        timeout = CONFIG.docker_force_stop_timeout
+        timeout = config.docker_force_stop_timeout
 
     overall_start = time.monotonic()
 
-    for retry in range(CONFIG.docker_shutdown_max_retries):
+    for retry in range(config.docker_shutdown_max_retries):
         check_shutdown_requested()
 
         if retry > 0:
             log.warning(
-                f"Container shutdown retry {retry + 1}/{CONFIG.docker_shutdown_max_retries}"
+                f"Container shutdown retry {retry + 1}/{config.docker_shutdown_max_retries}"
             )
-            time.sleep(CONFIG.docker_shutdown_retry_delay)
+            time.sleep(config.docker_shutdown_retry_delay)
 
         # Check overall timeout
-        if time.monotonic() - overall_start > CONFIG.docker_shutdown_overall_timeout:
+        if time.monotonic() - overall_start > config.docker_shutdown_overall_timeout:
             log.critical("Overall container shutdown timeout exceeded!")
             break
 
@@ -2030,7 +2030,7 @@ def ensure_all_containers_stopped(
         log.info("-" * 40)
         force_stop_containers(remaining, timeout=timeout)
 
-        time.sleep(CONFIG.docker_verify_shutdown_interval)
+        time.sleep(config.docker_verify_shutdown_interval)
 
         remaining = get_running_container_ids()
         if not remaining:
@@ -2045,7 +2045,7 @@ def ensure_all_containers_stopped(
         log.info("-" * 40)
         force_kill_containers(remaining)
 
-        time.sleep(CONFIG.docker_kill_wait_time)
+        time.sleep(config.docker_kill_wait_time)
 
         final_remaining = get_running_container_ids()
         if not final_remaining:
@@ -2053,8 +2053,7 @@ def ensure_all_containers_stopped(
             return True
 
         log.error(
-            f"Still have {len(final_remaining)} stubborn container(s): "
-            f"{_describe_containers(final_remaining)}"
+            f"Still have {len(final_remaining)} stubborn container(s): {_describe_containers(final_remaining)}"
         )
 
     # All retries exhausted
@@ -2145,12 +2144,12 @@ def _effective_backup_sources() -> tuple[list[str], list[str]]:
 
     Returns (valid_source_paths, failed_descriptions).
     """
-    sources = list(CONFIG.backup_sources)
+    sources = list(config.backup_sources)
 
     # The Plex data dir was historically handled as a separate priority pass.
     # Now it is simply guaranteed to be part of the source list (unless a
     # configured source already contains it).
-    plex = CONFIG.plex_data_dir
+    plex = config.plex_data_dir
     if plex.exists():
         plex_resolved = plex.resolve()
         covered = any(
@@ -2201,7 +2200,7 @@ def create_backup(backup_file: Path) -> bool:
 
     exclude_opts = [
         f"--exclude={path.resolve()}"
-        for path in CONFIG.backup_exclusions
+        for path in config.backup_exclusions
         if path.exists()
     ]
 
@@ -2217,28 +2216,27 @@ def create_backup(backup_file: Path) -> bool:
         *valid_sources,
     ]
     compress_cmd = [
-        resolve_command(CONFIG.compression_tool),
-        f"-{CONFIG.compression_level}",
+        resolve_command(config.compression_tool),
+        f"-{config.compression_level}",
     ]
     encrypt_cmd = [
         resolve_command("age"),
         "-e",
         "-i",
-        str(CONFIG.age_identity_file),
+        str(config.age_identity_file),
         "-o",
         str(backup_file),
     ]
 
     log.info(
-        f"Backing up {len(valid_sources)} source(s) via streaming pipeline: "
-        f"tar | {CONFIG.compression_tool} -{CONFIG.compression_level} | age"
+        f"Backing up {len(valid_sources)} source(s) via streaming pipeline: tar | {config.compression_tool} -{config.compression_level} | age"
     )
 
     try:
         result = run_pipeline(
             [
                 ("tar", tar_cmd),
-                (CONFIG.compression_tool, compress_cmd),
+                (config.compression_tool, compress_cmd),
                 ("age", encrypt_cmd),
             ],
             timeout=BACKUP_CREATE_TIMEOUT,
@@ -2297,10 +2295,10 @@ def verify_backup(backup_file: Path) -> bool:
                 resolve_command("age"),
                 "-d",
                 "-i",
-                str(CONFIG.age_identity_file),
+                str(config.age_identity_file),
             ],
         ),
-        (CONFIG.compression_tool, [resolve_command(CONFIG.compression_tool), "-d"]),
+        (config.compression_tool, [resolve_command(config.compression_tool), "-d"]),
         ("tar", [resolve_tar(), "-tf", "-"]),
     ]
 
@@ -2345,8 +2343,8 @@ def write_sha256_manifest(backup_file: Path) -> Path | None:
     log.info(f"SHA-256 manifest written: {manifest.name}")
 
     try:
-        uid = pwd.getpwnam(CONFIG.backup_user).pw_uid
-        gid = grp.getgrnam(CONFIG.backup_group).gr_gid
+        uid = pwd.getpwnam(config.backup_user).pw_uid
+        gid = grp.getgrnam(config.backup_group).gr_gid
         os.chown(manifest, uid, gid)
         os.chmod(manifest, 0o644)
     except (KeyError, OSError) as e:
@@ -2362,8 +2360,8 @@ def set_permissions(backup_file: Path) -> None:
 
     log.info("Setting final permissions on backup file...")
     try:
-        uid = pwd.getpwnam(CONFIG.backup_user).pw_uid
-        gid = grp.getgrnam(CONFIG.backup_group).gr_gid
+        uid = pwd.getpwnam(config.backup_user).pw_uid
+        gid = grp.getgrnam(config.backup_group).gr_gid
         os.chown(backup_file, uid, gid)
         os.chmod(backup_file, 0o600)
     except (KeyError, OSError) as e:
@@ -2377,8 +2375,8 @@ def set_log_permissions(log_file: Path) -> None:
         return
 
     try:
-        uid = pwd.getpwnam(CONFIG.backup_user).pw_uid
-        gid = grp.getgrnam(CONFIG.backup_group).gr_gid
+        uid = pwd.getpwnam(config.backup_user).pw_uid
+        gid = grp.getgrnam(config.backup_group).gr_gid
         os.chown(log_file, uid, gid)
         os.chmod(log_file, 0o644)
     except (KeyError, OSError) as e:
@@ -2421,7 +2419,7 @@ def emergency_container_restart() -> None:
 def send_final_status_notification(success: bool, log_file: Path | None) -> None:
     """Send final status notification with summary. This is the single place
     that uploads the log to PrivateBin (once per run)."""
-    if not CONFIG.discord_webhook_url:
+    if not config.discord_webhook_url:
         return
 
     privatebin_link = upload_log_to_privatebin(log_file)
@@ -2595,7 +2593,7 @@ def _finalize_run(success: bool, log_file: Path | None) -> None:
 
     backup_state.stage = BackupStage.CONTAINER_RESTART_ALL
 
-    if CONFIG.docker_enabled and not dry_run_mode:
+    if config.docker_enabled and not dry_run_mode:
         try:
             plex_compose, other_compose = get_docker_compose_files()
 
@@ -2653,18 +2651,18 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
         backup_state.maintenance_window_id = create_backup_maintenance_window()
 
         # Get compose files
-        if CONFIG.docker_enabled:
+        if config.docker_enabled:
             plex_compose, other_compose = get_docker_compose_files()
         else:
             plex_compose, other_compose = [], []
         all_compose_files = plex_compose + other_compose
 
         # Log rotation (backup rotation happens after verification)
-        _ = rotate_items(CONFIG.log_root_dir, "*-backupScript.log", CONFIG.retention_logs)
+        _ = rotate_items(config.log_root_dir, "*-backupScript.log", config.retention_logs)
 
         # Stage: Container shutdown
         backup_state.stage = BackupStage.CONTAINER_SHUTDOWN
-        if CONFIG.docker_enabled:
+        if config.docker_enabled:
             backup_state.containers_stopped = ensure_all_containers_stopped(
                 all_compose_files
             )
@@ -2677,10 +2675,10 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
         # Stage: Backup creation
         backup_state.stage = BackupStage.BACKUP_CREATION
         backup_filename = f"{timestamp.replace('_', '-')}_backup.tar.gz.age"
-        backup_file = CONFIG.backup_root_dir / backup_filename
+        backup_file = config.backup_root_dir / backup_filename
         backup_state.backup_file = backup_file
         if not dry_run_mode:
-            CONFIG.backup_root_dir.mkdir(parents=True, exist_ok=True)
+            config.backup_root_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             if create_backup(backup_file):
@@ -2694,7 +2692,7 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
 
         # Stage: Start Plex first (priority service)
         backup_state.stage = BackupStage.CONTAINER_RESTART_PLEX
-        if CONFIG.docker_enabled and plex_compose:
+        if config.docker_enabled and plex_compose:
             log.info("Restarting Plex (priority service)...")
             if manage_docker_services(plex_compose, "start"):
                 backup_state.plex_started = True
@@ -2716,17 +2714,17 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
         # Rotate backups only now that the new one exists (and hopefully
         # verified) - a failed run never eats into existing good backups.
         _ = rotate_items(
-            CONFIG.backup_root_dir,
+            config.backup_root_dir,
             ["*.tar.gz.age", "*.tar.gz.enc"],
-            CONFIG.retention_backups,
+            config.retention_backups,
         )
-        cleanup_orphan_manifests(CONFIG.backup_root_dir)
+        cleanup_orphan_manifests(config.backup_root_dir)
 
         check_shutdown_requested()
 
         # Stage: Rclone sync
         backup_state.stage = BackupStage.RCLONE_SYNC
-        if CONFIG.rclone_enabled and backup_state.backup_created:
+        if config.rclone_enabled and backup_state.backup_created:
             rclone_summary = run_rclone_sync_with_retry(log_file)
 
             if rclone_summary["status"] == "success":
@@ -2744,8 +2742,8 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
                     f"📄 Files: {rclone_summary['transferred_files']}\n"
                     f"🔍 Checks: {rclone_summary['checks_count']} / {rclone_summary['total_checks']}\n\n"
                     f"**Sync Info**\n"
-                    f"Source: `{CONFIG.backup_root_dir}`\n"
-                    f"Destination: `{CONFIG.rclone_remote_dest}`\n\n"
+                    f"Source: `{config.backup_root_dir}`\n"
+                    f"Destination: `{config.rclone_remote_dest}`\n\n"
                     f"**Timestamp**\n"
                     f"{success_timestamp}"
                 )
@@ -2808,6 +2806,28 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
 # -----------------------------------------------------------------------------
 # CLI
 # -----------------------------------------------------------------------------
+
+
+class CliArgs(argparse.Namespace):
+    """Typed view of the parsed command-line arguments (argparse fills the
+    instance attributes; the class-level defaults cover attributes that only
+    exist on one subcommand)."""
+
+    dry_run: bool = False
+    verbose: bool = False
+    config: Path | None = None
+    no_docker: bool = False
+    no_upload: bool = False
+    backup_only: bool = False
+    print_default_config: bool = False
+    command: str | None = None
+    # restore subcommand
+    backup_file: Path | None = None
+    output_dir: Path | None = None
+    list_contents: bool = False
+    force: bool = False
+    identity: Path | None = None
+    password_file: Path | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2894,24 +2914,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cmd_backup(args: argparse.Namespace) -> int:
-    global CONFIG, dry_run_mode, backup_state
+def cmd_backup(args: CliArgs) -> int:
+    global config, dry_run_mode, backup_state
 
-    setup_console_logging(verbose=bool(args.verbose))
+    setup_console_logging(verbose=args.verbose)
 
     try:
-        CONFIG = load_config(args.config)
+        config = load_config(args.config)
     except ConfigError as e:
         log.critical(str(e))
         return 2
 
-    dry_run_mode = bool(args.dry_run)
+    dry_run_mode = args.dry_run
     if args.no_docker or args.backup_only:
-        CONFIG.docker_enabled = False
+        config.docker_enabled = False
     if args.no_upload or args.backup_only:
-        CONFIG.rclone_enabled = False
+        config.rclone_enabled = False
     if args.backup_only:
-        CONFIG.uptime_kuma_enabled = False
+        config.uptime_kuma_enabled = False
 
     backup_state = BackupState()
     setup_signal_handlers()
@@ -2919,14 +2939,13 @@ def cmd_backup(args: argparse.Namespace) -> int:
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file: Path | None = None
     try:
-        CONFIG.log_root_dir.mkdir(parents=True, exist_ok=True)
-        log_file = CONFIG.log_root_dir / f"{timestamp}-backupScript.log"
+        config.log_root_dir.mkdir(parents=True, exist_ok=True)
+        log_file = config.log_root_dir / f"{timestamp}-backupScript.log"
         add_file_logging(log_file)
         set_log_permissions(log_file)
     except OSError as e:
         log.warning(
-            f"Cannot write log file under {CONFIG.log_root_dir} ({e}); "
-            f"continuing with console logging only."
+            f"Cannot write log file under {config.log_root_dir} ({e}); continuing with console logging only."
         )
         log_file = None
 
@@ -2936,11 +2955,11 @@ def cmd_backup(args: argparse.Namespace) -> int:
     # Acquire the lock BEFORE entering the run's try/finally. A concurrent
     # run must exit here without touching Docker, notifications, or the
     # other run's lock file.
-    lock_ctx = acquire_lock(CONFIG.lock_file)
+    lock_ctx = acquire_lock(config.lock_file)
     try:
         _ = lock_ctx.__enter__()
     except FileExistsError:
-        log.critical(f"Script is already running. Lock file exists: {CONFIG.lock_file}")
+        log.critical(f"Script is already running. Lock file exists: {config.lock_file}")
         return 1
 
     try:
@@ -2949,35 +2968,36 @@ def cmd_backup(args: argparse.Namespace) -> int:
         _ = lock_ctx.__exit__(None, None, None)
 
 
-def cmd_restore(args: argparse.Namespace) -> int:
-    global CONFIG
+def cmd_restore(args: CliArgs) -> int:
+    global config
 
-    setup_console_logging(verbose=bool(args.verbose))
+    setup_console_logging(verbose=args.verbose)
 
     try:
-        CONFIG = load_config(args.config)
+        config = load_config(args.config)
     except ConfigError as e:
         log.critical(str(e))
         return 2
 
-    identity = args.identity or CONFIG.age_identity_file
-    password_file = args.password_file or CONFIG.legacy_password_file
+    if args.backup_file is None:  # argparse enforces this; guard for typing
+        log.critical("No backup file specified.")
+        return 2
 
     return run_restore(
         backup_file=args.backup_file,
         output_dir=args.output_dir,
-        list_only=bool(args.list_contents),
-        force=bool(args.force),
-        identity=identity,
-        password_file=password_file,
+        list_only=args.list_contents,
+        force=args.force,
+        identity=args.identity or config.age_identity_file,
+        password_file=args.password_file or config.legacy_password_file,
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv, namespace=CliArgs())
 
-    if getattr(args, "print_default_config", False):
+    if args.print_default_config:
         _ = sys.stdout.write(default_config_toml())
         return 0
 

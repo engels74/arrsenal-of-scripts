@@ -59,7 +59,7 @@ class ScriptTestCase(unittest.TestCase):
     """Base: isolates the module globals each test mutates."""
 
     def setUp(self) -> None:
-        mod.CONFIG = mod.Config()
+        mod.config = mod.Config()
         mod.dry_run_mode = False
         mod.backup_state = mod.BackupState()
         mod._lock_owned = False
@@ -277,7 +277,7 @@ class TestLocking(ScriptTestCase):
         # Fresh empty lock: not stale.
         self.assertFalse(mod.is_stale_lock(self.lock_path))
         # Ancient empty lock: stale.
-        old = time.time() - mod.CONFIG.script_overall_timeout - 100
+        old = time.time() - mod.config.script_overall_timeout - 100
         os.utime(self.lock_path, (old, old))
         self.assertTrue(mod.is_stale_lock(self.lock_path))
 
@@ -342,8 +342,8 @@ class TestRestoreRoundTrip(ScriptTestCase):
         self.assertEqual(gz.wait(timeout=10), 0)
         self.assertEqual(tar.wait(timeout=10), 0)
 
-        mod.CONFIG.age_identity_file = self.identity
-        mod.CONFIG.compression_tool = "gzip"
+        mod.config.age_identity_file = self.identity
+        mod.config.compression_tool = "gzip"
 
     def test_verify_backup_succeeds(self):
         self.assertTrue(mod.verify_backup(self.backup_file))
@@ -437,11 +437,11 @@ class TestCreateBackupEndToEnd(ScriptTestCase):
         excluded.mkdir()
         (excluded / "b.txt").write_text("should not appear")
 
-        mod.CONFIG.age_identity_file = identity
-        mod.CONFIG.compression_tool = "gzip"
-        mod.CONFIG.backup_sources = [src]
-        mod.CONFIG.backup_exclusions = [excluded]
-        mod.CONFIG.plex_data_dir = self.tmp / "no-plex-here"
+        mod.config.age_identity_file = identity
+        mod.config.compression_tool = "gzip"
+        mod.config.backup_sources = [src]
+        mod.config.backup_exclusions = [excluded]
+        mod.config.plex_data_dir = self.tmp / "no-plex-here"
 
         backup_file = self.tmp / "e2e_backup.tar.gz.age"
         self.assertTrue(mod.create_backup(backup_file))
