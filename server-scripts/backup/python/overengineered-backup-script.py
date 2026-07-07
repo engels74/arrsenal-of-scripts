@@ -32,6 +32,7 @@ import argparse
 import atexit
 import contextlib
 import datetime
+import functools
 import json
 import logging
 import os
@@ -347,6 +348,67 @@ dry_run_mode = False
 backup_state = BackupState()
 shutdown_requested = False
 lock_fd: int | None = None
+
+
+# -----------------------------------------------------------------------------
+# External Command Resolution
+# -----------------------------------------------------------------------------
+# Under sudo, PATH is reset to a minimal "secure_path" that excludes
+# Homebrew/Linuxbrew directories, so brew-installed tools (rclone, pigz, ...)
+# are not found. Fall back to the standard brew locations when needed.
+
+HOMEBREW_FALLBACK_DIRS = [
+    Path("/home/linuxbrew/.linuxbrew/bin"),  # Linuxbrew (system-wide)
+    Path("/home/linuxbrew/.linuxbrew/sbin"),
+    Path("/opt/homebrew/bin"),  # Homebrew (macOS Apple Silicon)
+    Path("/opt/homebrew/sbin"),
+    Path("/usr/local/bin"),  # Homebrew (macOS Intel) / manual installs
+    Path("/usr/local/sbin"),
+]
+
+
+def _command_search_dirs() -> list[Path]:
+    """Candidate directories for binaries missing from the (sudo) PATH."""
+    dirs: list[Path] = []
+
+    # An explicit Homebrew prefix wins if it survived the environment.
+    brew_prefix = os.environ.get("HOMEBREW_PREFIX")
+    if brew_prefix:
+        dirs.extend([Path(brew_prefix) / "bin", Path(brew_prefix) / "sbin"])
+
+    dirs.extend(HOMEBREW_FALLBACK_DIRS)
+
+    # Per-user Linuxbrew install (~/.linuxbrew) of the user who invoked sudo.
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            sudo_home = Path(pwd.getpwnam(sudo_user).pw_dir)
+            dirs.extend([sudo_home / ".linuxbrew/bin", sudo_home / ".linuxbrew/sbin"])
+        except KeyError:
+            pass
+
+    return [d for d in dirs if d.is_dir()]
+
+
+@functools.lru_cache(maxsize=None)
+def find_command(name: str) -> str | None:
+    """Locate a command on PATH, falling back to Homebrew/Linuxbrew dirs."""
+    found = shutil.which(name)
+    if found:
+        return found
+
+    fallback_path = os.pathsep.join(str(d) for d in _command_search_dirs())
+    if fallback_path:
+        found = shutil.which(name, path=fallback_path)
+        if found:
+            log.info(f"'{name}' not on PATH; using brew fallback: {found}")
+            return found
+    return None
+
+
+def resolve_command(name: str) -> str:
+    """Return the resolved absolute path for a command, or the bare name."""
+    return find_command(name) or name
 
 
 # -----------------------------------------------------------------------------
@@ -877,7 +939,8 @@ def upload_log_to_privatebin(log_file: Path) -> str | None:
     """Uploads the log file to PrivateBin and returns the URL."""
     if not ENABLE_PRIVATEBIN_UPLOAD or dry_run_mode:
         return None
-    if not shutil.which(PRIVATEBIN_CLI_PATH):
+    privatebin_cmd = find_command(PRIVATEBIN_CLI_PATH)
+    if not privatebin_cmd:
         log.warning(
             f"PrivateBin CLI not found at '{PRIVATEBIN_CLI_PATH}'. Skipping log upload."
         )
@@ -887,7 +950,7 @@ def upload_log_to_privatebin(log_file: Path) -> str | None:
     try:
         with open(log_file, "r") as f:
             result = subprocess.run(
-                [PRIVATEBIN_CLI_PATH, "create"],
+                [privatebin_cmd, "create"],
                 stdin=f,
                 capture_output=True,
                 text=True,
@@ -1052,7 +1115,7 @@ def _execute_rclone_sync(log_file: Path) -> dict[str, str | int]:
     rclone_log = log_file.with_suffix(".rclone.log")
 
     command = [
-        "rclone",
+        resolve_command("rclone"),
         "sync",
         str(RCLONE_SOURCE_DIR),
         RCLONE_REMOTE_DEST,
@@ -1210,13 +1273,19 @@ def pre_flight_checks() -> None:
         deps.append("rclone")
 
     for dep in deps:
-        if not shutil.which(dep):
+        resolved = find_command(dep)
+        if not resolved:
             log.critical(f"Missing required dependency: {dep}")
+            log.critical(
+                "Searched PATH and Homebrew/Linuxbrew locations: "
+                + ", ".join(str(d) for d in _command_search_dirs())
+            )
             if dep == "pigz":
                 log.critical(
                     "You can usually install it with: sudo apt-get install pigz"
                 )
             sys.exit(1)
+        log.debug(f"Dependency '{dep}' resolved to: {resolved}")
 
     try:
         _ = pwd.getpwnam(BACKUP_USER)
@@ -1258,7 +1327,7 @@ def get_docker_compose_files() -> tuple[list[Path], list[Path]]:
 def get_running_container_ids() -> list[str]:
     """Get list of all running container IDs."""
     result = subprocess.run(
-        ["docker", "ps", "-q"],
+        [resolve_command("docker"), "ps", "-q"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1276,7 +1345,13 @@ def get_container_names(container_ids: list[str]) -> dict[str, str]:
 
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format", "{{.ID}}: {{.Name}}", *container_ids],
+            [
+                resolve_command("docker"),
+                "inspect",
+                "--format",
+                "{{.ID}}: {{.Name}}",
+                *container_ids,
+            ],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1307,7 +1382,7 @@ def manage_docker_services(compose_files: list[Path], action: str) -> bool:
             log.warning(f"Compose file not found: {file}. Skipping.")
             continue
 
-        command = ["docker", "compose", "-f", str(file)]
+        command = [resolve_command("docker"), "compose", "-f", str(file)]
         if action == "stop":
             command.append(DOCKER_SHUTDOWN_METHOD)
         else:
@@ -1350,7 +1425,7 @@ def force_stop_containers(container_ids: list[str], timeout: int = 30) -> bool:
 
     try:
         result = subprocess.run(
-            ["docker", "stop", "-t", str(timeout), *container_ids],
+            [resolve_command("docker"), "stop", "-t", str(timeout), *container_ids],
             capture_output=True,
             text=True,
             timeout=timeout + 30,
@@ -1380,7 +1455,7 @@ def force_kill_containers(container_ids: list[str]) -> bool:
 
     try:
         result = subprocess.run(
-            ["docker", "kill", *container_ids],
+            [resolve_command("docker"), "kill", *container_ids],
             capture_output=True,
             text=True,
             timeout=60,
@@ -1600,7 +1675,14 @@ def create_backup(backup_file: Path) -> bool:
             plex_name = PLEX_DATA_DIR.name
 
             result = subprocess.run(
-                ["tar", "-cf", str(temp_tar_file), "-C", str(plex_parent), plex_name],
+                [
+                    resolve_command("tar"),
+                    "-cf",
+                    str(temp_tar_file),
+                    "-C",
+                    str(plex_parent),
+                    plex_name,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=3600,  # 1 hour timeout for Plex data
@@ -1625,7 +1707,7 @@ def create_backup(backup_file: Path) -> bool:
             # Use --ignore-failed-read to continue on errors
             tar_command: list[str] = (
                 [
-                    "tar",
+                    resolve_command("tar"),
                     "-rf" if temp_tar_file.exists() else "-cf",
                     str(temp_tar_file),
                     "-C",
@@ -1662,14 +1744,14 @@ def create_backup(backup_file: Path) -> bool:
 
         with open(temp_tar_file, "rb") as tar_in, open(backup_file, "wb") as final_out:
             compress_proc = subprocess.Popen(
-                [BACKUP_COMPRESSION_TOOL, f"-{BACKUP_COMPRESSION_LEVEL}"],
+                [resolve_command(BACKUP_COMPRESSION_TOOL), f"-{BACKUP_COMPRESSION_LEVEL}"],
                 stdin=tar_in,
                 stdout=subprocess.PIPE,
             )
 
             encrypt_proc = subprocess.Popen(
                 [
-                    "openssl",
+                    resolve_command("openssl"),
                     "enc",
                     "-aes-256-cbc",
                     "-md",
@@ -1738,7 +1820,7 @@ def verify_backup(backup_file: Path) -> bool:
         with open(backup_file, "rb") as f_in:
             openssl_proc = subprocess.Popen(
                 [
-                    "openssl",
+                    resolve_command("openssl"),
                     "enc",
                     "-d",
                     "-aes-256-cbc",
@@ -1754,14 +1836,14 @@ def verify_backup(backup_file: Path) -> bool:
             )
 
             compress_proc = subprocess.Popen(
-                [BACKUP_COMPRESSION_TOOL, "-d"],
+                [resolve_command(BACKUP_COMPRESSION_TOOL), "-d"],
                 stdin=openssl_proc.stdout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
             tar_proc = subprocess.Popen(
-                ["tar", "-tf", "-"],
+                [resolve_command("tar"), "-tf", "-"],
                 stdin=compress_proc.stdout,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
