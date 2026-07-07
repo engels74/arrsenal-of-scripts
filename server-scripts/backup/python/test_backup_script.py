@@ -37,14 +37,7 @@ AGE_KEYGEN = mod.find_command("age-keygen")
 
 
 def _tar_is_gnu() -> bool:
-    tar = mod.resolve_tar()
-    try:
-        out = subprocess.run(
-            [tar, "--version"], capture_output=True, text=True, timeout=10
-        ).stdout
-    except OSError:
-        return False
-    return "GNU tar" in out
+    return mod.tar_is_gnu(mod.resolve_tar())
 
 
 def setUpModule() -> None:
@@ -80,6 +73,19 @@ class TestFormatHelpers(ScriptTestCase):
         self.assertEqual(mod.format_duration(0), "0h:0m:0s")
         self.assertEqual(mod.format_duration(3723), "1h:2m:3s")
         self.assertEqual(mod.format_duration(59.9), "0h:0m:59s")
+
+
+class TestPathHelpers(ScriptTestCase):
+    def test_existing_dir_returns_itself(self):
+        self.assertEqual(mod.nearest_existing_dir(self.tmp), self.tmp)
+
+    def test_missing_dir_returns_existing_ancestor(self):
+        self.assertEqual(
+            mod.nearest_existing_dir(self.tmp / "not" / "yet" / "created"), self.tmp
+        )
+
+    def test_tar_is_gnu_rejects_missing_binary(self):
+        self.assertFalse(mod.tar_is_gnu("/nonexistent/definitely-not-tar"))
 
 
 class TestRcloneRetryClassification(ScriptTestCase):

@@ -694,6 +694,16 @@ def resolve_tar() -> str:
     return find_command("gtar") or resolve_command("tar")
 
 
+def tar_is_gnu(tar_path: str) -> bool:
+    """The backup pipeline depends on GNU-only tar flags; BSD/libarchive tar
+    (the macOS default) is not sufficient."""
+    try:
+        result = run_command([tar_path, "--version"], timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0 and "GNU tar" in result.stdout
+
+
 # -----------------------------------------------------------------------------
 # Subprocess Tracking (signal-responsive execution)
 # -----------------------------------------------------------------------------
@@ -946,6 +956,15 @@ def is_stale_lock(lock_path: Path) -> bool:
 # -----------------------------------------------------------------------------
 # Disk Space Checking
 # -----------------------------------------------------------------------------
+
+
+def nearest_existing_dir(path: Path) -> Path:
+    """Walk up from `path` to its closest existing ancestor - the filesystem
+    on which the directory would be created."""
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return Path("/")
 
 
 def check_disk_space(path: Path) -> tuple[bool, str]:
@@ -1722,7 +1741,17 @@ def pre_flight_checks() -> None:
             f"Invalid compression_tool: {config.compression_tool}. Must be 'gzip' or 'pigz'."
         )
 
-    deps = ["tar", config.compression_tool, "age"]
+    tar_path = resolve_tar()
+    if find_command("gtar") is None and find_command("tar") is None:
+        problem("Missing required dependency: tar")
+    elif not tar_is_gnu(tar_path):
+        problem(
+            f"GNU tar is required (the backup pipeline uses GNU-only flags) but '{tar_path}' is not GNU tar. On macOS install it with: brew install gnu-tar (picked up automatically as 'gtar')."
+        )
+    else:
+        log.info(f"Dependency 'tar' resolved to: {tar_path} (GNU tar)")
+
+    deps = [config.compression_tool, "age"]
     if config.docker_enabled:
         deps.append("docker")
     if config.rclone_enabled:
@@ -1760,9 +1789,7 @@ def pre_flight_checks() -> None:
     except KeyError as e:
         problem(f"Backup user/group not found: {e}")
 
-    space_ok, space_msg = check_disk_space(
-        config.backup_root_dir if config.backup_root_dir.exists() else Path("/")
-    )
+    space_ok, space_msg = check_disk_space(nearest_existing_dir(config.backup_root_dir))
     if not space_ok:
         problem(space_msg)
     else:
@@ -2542,7 +2569,12 @@ def run_restore(
                 f"Output directory {output_dir} is not empty. Use --force to extract anyway."
             )
             return 1
-        tar_stage = ("tar", [resolve_tar(), "-xf", "-", "-C", str(output_dir)])
+        extract_cmd = [resolve_tar(), "-xf", "-", "-C", str(output_dir)]
+        if os.geteuid() != 0:
+            # Ownership/permission restoration needs root; skip it explicitly
+            # so no tar variant errors out attempting a chown as a plain user.
+            extract_cmd += ["--no-same-owner", "--no-same-permissions"]
+        tar_stage = ("tar", extract_cmd)
         stdout_final = subprocess.DEVNULL
         log.info(f"Extracting {backup_file.name} to {output_dir}...")
 
@@ -2711,14 +2743,19 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
             log.critical(f"Backup verification failed: {e}")
             # Continue anyway - we have the backup even if verification failed
 
-        # Rotate backups only now that the new one exists (and hopefully
-        # verified) - a failed run never eats into existing good backups.
-        _ = rotate_items(
-            config.backup_root_dir,
-            ["*.tar.gz.age", "*.tar.gz.enc"],
-            config.retention_backups,
-        )
-        cleanup_orphan_manifests(config.backup_root_dir)
+        # Rotate backups only once the new one has verified - a failed or
+        # unverified run must never eat into existing good backups.
+        if backup_state.backup_verified:
+            _ = rotate_items(
+                config.backup_root_dir,
+                ["*.tar.gz.age", "*.tar.gz.enc"],
+                config.retention_backups,
+            )
+            cleanup_orphan_manifests(config.backup_root_dir)
+        else:
+            log.warning(
+                "Skipping backup rotation: the new backup did not pass verification."
+            )
 
         check_shutdown_requested()
 
