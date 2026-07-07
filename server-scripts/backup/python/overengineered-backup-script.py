@@ -325,6 +325,18 @@ _TOML_SCHEMA: dict[str, dict[str, str]] = {
 
 _PATH_LIST_ATTRS = {"backup_sources", "backup_exclusions"}
 
+# Config keys removed in past breaking changes, keyed by (section, key). Lets
+# _apply_toml give a targeted upgrade hint for a stale config instead of the
+# generic "unknown key" message (the removal only lives in git history otherwise).
+_REMOVED_TOML_KEYS: dict[tuple[str, str], str] = {
+    ("encryption", "legacy_password_file"): (
+        "the legacy openssl (.enc) encryption path was removed, so this key no "
+        "longer exists. Delete it from your config to run backups again; normal "
+        "age-based backups are unaffected. To read old .enc backups, decrypt them "
+        "manually with openssl."
+    ),
+}
+
 
 def _apply_toml(cfg: Config, data: dict[str, object], source: Path) -> None:
     """Apply a parsed TOML document onto a Config, validating every key."""
@@ -337,6 +349,9 @@ def _apply_toml(cfg: Config, data: dict[str, object], source: Path) -> None:
         for key, value in cast(dict[str, object], table).items():
             attr = section_schema.get(key)
             if attr is None:
+                hint = _REMOVED_TOML_KEYS.get((section, key))
+                if hint is not None:
+                    raise ConfigError(f"{source}: [{section}] {key} - {hint}")
                 raise ConfigError(f"{source}: unknown key '{key}' in [{section}]")
             default = cast(object, getattr(cfg, attr))
             if isinstance(default, Path):

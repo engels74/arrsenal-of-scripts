@@ -298,6 +298,24 @@ backup_root_dir = "/custom/backups"
         with self.assertRaises(mod.ConfigError):
             mod.load_config(path)
 
+    def test_removed_legacy_password_file_gives_upgrade_hint(self):
+        # A stale config with the dropped [encryption] legacy_password_file key
+        # must fail with an actionable message, not the bare "unknown key" one.
+        path = self._write('[encryption]\nlegacy_password_file = "/root/.key"\n')
+        with self.assertRaises(mod.ConfigError) as ctx:
+            mod.load_config(path)
+        message = str(ctx.exception)
+        self.assertIn("legacy openssl", message)
+        self.assertIn("Delete it", message)
+
+    def test_unknown_encryption_key_still_generic(self):
+        # A genuinely-unknown key must keep the generic error - the removed-key
+        # special case must not swallow every unknown key in the section.
+        path = self._write('[encryption]\nbogus_key = "x"\n')
+        with self.assertRaises(mod.ConfigError) as ctx:
+            mod.load_config(path)
+        self.assertIn("unknown key", str(ctx.exception))
+
     def test_wrong_type_rejected(self):
         path = self._write('[retention]\nbackups = "three"\n')
         with self.assertRaises(mod.ConfigError):
