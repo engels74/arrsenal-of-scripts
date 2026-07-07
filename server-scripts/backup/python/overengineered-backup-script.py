@@ -399,6 +399,13 @@ def load_config(path: Path | None) -> Config:
     if webhook_url := os.environ.get(ENV_DISCORD_WEBHOOK_URL):
         cfg.discord_webhook_url = webhook_url
 
+    # A negative retention count would slice from the wrong end in
+    # rotate_items() and delete an unexpected subset of files.
+    if cfg.retention_backups < 0 or cfg.retention_logs < 0:
+        raise ConfigError(
+            f"{config_path}: retention counts must be non-negative (backups={cfg.retention_backups}, logs={cfg.retention_logs})"
+        )
+
     return cfg
 
 
@@ -1778,6 +1785,11 @@ def pre_flight_checks() -> None:
             f"Invalid compression_tool: {config.compression_tool}. Must be 'gzip' or 'pigz'."
         )
 
+    if config.docker_enabled and config.docker_shutdown_method not in ("down", "stop"):
+        problem(
+            f"Invalid docker shutdown_method: {config.docker_shutdown_method}. Must be 'down' or 'stop'."
+        )
+
     tar_path = resolve_tar()
     if find_command("gtar") is None and find_command("tar") is None:
         problem("Missing required dependency: tar")
@@ -2677,6 +2689,10 @@ def run_restore(
         terminate_active_processes()
         return 130
 
+    if shutdown_requested:
+        log.warning("Restore interrupted by signal.")
+        return 130
+
     failed = False
     for (stage_name, _), rc, err in zip(stages, result.returncodes, result.stderr):
         if rc != 0:
@@ -3110,6 +3126,10 @@ def cmd_restore(args: CliArgs) -> int:
     if args.backup_file is None:  # argparse enforces this; guard for typing
         log.critical("No backup file specified.")
         return 2
+
+    # Terminate the decrypt/decompress/extract pipeline on external signals
+    # (SIGTERM/SIGHUP) instead of leaving child processes running.
+    setup_signal_handlers()
 
     return run_restore(
         backup_file=args.backup_file,

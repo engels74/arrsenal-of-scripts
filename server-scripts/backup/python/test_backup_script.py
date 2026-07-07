@@ -123,6 +123,13 @@ class TestPreFlightDryRun(ScriptTestCase):
         self.assertTrue(mod.backup_state.errors)
         self.assertIn("Invalid compression_tool", mod.backup_state.errors[0])
 
+    def test_invalid_shutdown_method_is_aggregated_not_raised(self):
+        mod.dry_run_mode = True
+        mod.config.docker_shutdown_method = "dwn"
+        mod.pre_flight_checks()  # must not raise in dry-run mode
+        self.assertTrue(mod.backup_state.errors)
+        self.assertIn("Invalid docker shutdown_method", mod.backup_state.errors[0])
+
     def test_dry_run_problems_are_recorded_as_errors(self):
         # On any non-root test machine at least the root check fails, so the
         # dry run must record an error (=> non-zero exit) instead of only
@@ -221,6 +228,14 @@ backup_root_dir = "/custom/backups"
         with self.assertRaises(mod.ConfigError):
             mod.load_config(path)
         path = self._write("[docker]\nenabled = 1\n")
+        with self.assertRaises(mod.ConfigError):
+            mod.load_config(path)
+
+    def test_negative_retention_rejected(self):
+        path = self._write("[retention]\nbackups = -1\n")
+        with self.assertRaises(mod.ConfigError):
+            mod.load_config(path)
+        path = self._write("[retention]\nlogs = -3\n")
         with self.assertRaises(mod.ConfigError):
             mod.load_config(path)
 
