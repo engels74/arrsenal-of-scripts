@@ -720,7 +720,11 @@ def tar_is_gnu(tar_path: str) -> bool:
 # subprocess to finish on its own.
 
 _active_processes: set[subprocess.Popen[bytes] | subprocess.Popen[str]] = set()
-_process_lock = threading.Lock()
+# Reentrant on purpose: signal_handler() runs synchronously on the main thread
+# and may fire while that thread already holds this lock inside _track_process()
+# or _untrack_process(). A plain Lock would self-deadlock there; an RLock lets
+# the handler re-acquire it while still excluding the watchdog thread.
+_process_lock = threading.RLock()
 
 
 def _track_process(proc: subprocess.Popen[bytes] | subprocess.Popen[str]) -> None:
@@ -2229,11 +2233,19 @@ def rotate_items(
         patterns = [patterns]
 
     log.info(f"Rotating items in {dir_path} matching {patterns}...")
-    items = sorted(
-        {p for pattern in patterns for p in dir_path.glob(pattern) if p.is_file()},
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    candidates = {
+        p for pattern in patterns for p in dir_path.glob(pattern) if p.is_file()
+    }
+    # stat() best-effort: a file can vanish between the glob and this stat
+    # (concurrent cleanup, another run). Skip such files rather than let an
+    # uncaught FileNotFoundError abort an otherwise-successful backup run.
+    stated: list[tuple[float, Path]] = []
+    for candidate in candidates:
+        try:
+            stated.append((candidate.stat().st_mtime, candidate))
+        except OSError:
+            continue
+    items = [p for _, p in sorted(stated, key=lambda pair: pair[0], reverse=True)]
 
     removed: list[Path] = []
     for item in items[retention_count:]:
@@ -2381,19 +2393,23 @@ def create_backup(backup_file: Path) -> bool:
         tar_rc, compress_rc, encrypt_rc = result.returncodes
         tar_err, compress_err, encrypt_err = result.stderr
 
+        # Check downstream-first. When a later stage (e.g. age) fails and closes
+        # its stdin, the upstream stages die of SIGPIPE with negative exit codes.
+        # Reporting the most-downstream real failure first surfaces the true root
+        # cause instead of a misleading "Compression failed with exit code -13".
+        if encrypt_rc != 0:
+            raise BackupCreationError(
+                f"Encryption failed with exit code {encrypt_rc}: {encrypt_err}"
+            )
+        if compress_rc != 0:
+            raise BackupCreationError(
+                f"Compression failed with exit code {compress_rc}: {compress_err}"
+            )
         # tar exit code 1 means "some files changed while reading" - acceptable.
         if tar_rc > 1 or tar_rc < 0:
             raise BackupCreationError(f"Tar failed with exit code {tar_rc}: {tar_err}")
         if tar_rc == 1:
             log.warning("Some files changed during backup (non-critical)")
-        if compress_rc != 0:
-            raise BackupCreationError(
-                f"Compression failed with exit code {compress_rc}: {compress_err}"
-            )
-        if encrypt_rc != 0:
-            raise BackupCreationError(
-                f"Encryption failed with exit code {encrypt_rc}: {encrypt_err}"
-            )
 
         if not backup_file.exists():
             raise BackupCreationError("Final backup file was not created")
