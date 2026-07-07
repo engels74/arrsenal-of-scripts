@@ -58,7 +58,7 @@ python server-scripts/backup/python/test_backup_script.py
 
 ### Python Backup Script
 - Creates encrypted backups via a streaming pipeline: tar -> pigz/gzip -> age (no temp tar on disk)
-- Encryption uses an age identity file (`/root/.backup_age_key.txt`); openssl is only needed to restore legacy `.enc` backups
+- Encryption uses an age identity file (`/root/.backup_age_key.txt`), generated post-quantum with `age-keygen -pq` (hybrid X25519 + ML-KEM-768, age >= 1.3.0); the pipeline encrypts to the identity's own recipient. Legacy openssl `.enc` restore support has been removed (decrypt those manually with `openssl`)
 - Configured via TOML file (`/etc/backup-script.toml`, override with `--config`); secrets via `BACKUP_UPTIME_KUMA_PASSWORD` / `BACKUP_DISCORD_WEBHOOK_URL` env vars; `--print-default-config` emits a commented example
 - CLI: `--dry-run` (root-free preflight preview), `--verbose`, `--no-docker`, `--no-upload`, `--backup-only`, and a `restore` subcommand (`restore <file> --list` / `--output-dir DIR`)
 - Requires GNU tar (resolved as `gtar` on macOS/brew); writes a `.sha256` manifest next to each backup
