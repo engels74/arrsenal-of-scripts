@@ -1569,6 +1569,59 @@ def _is_retryable_rclone_error(exit_code: int) -> bool:
     return exit_code not in non_retryable
 
 
+def _process_rclone_log(
+    rclone_log: Path, log_file: Path | None
+) -> tuple[JsonDict, list[str]]:
+    """Parse stats/error lines from the rclone JSON log, append it to the
+    main log, and remove it.
+
+    Filesystem errors here must never fail the sync attempt - the sync
+    status is decided by rclone's exit code; at worst the reported stats
+    are incomplete.
+    """
+    final_stats: JsonDict = {}
+    error_lines: list[str] = []
+
+    try:
+        if not rclone_log.exists():
+            return final_stats, error_lines
+
+        with open(rclone_log, "r") as f:
+            for line in f:
+                if not line.strip().startswith("{"):
+                    continue
+                try:
+                    parsed_json: object = json.loads(line)  # pyright: ignore[reportAny]
+                    if not isinstance(parsed_json, dict):
+                        continue
+
+                    log_entry = cast(JsonDict, parsed_json)
+
+                    stats_data = log_entry.get("stats")
+                    if "stats" in log_entry and isinstance(stats_data, dict):
+                        final_stats = stats_data
+
+                    elif log_entry.get("level") == "error":
+                        if (msg := log_entry.get("msg")) and isinstance(msg, str):
+                            error_lines.append(msg)
+                except json.JSONDecodeError:
+                    continue
+
+        # Append rclone log to main log
+        if log_file is not None:
+            with open(log_file, "a") as main_log, open(rclone_log, "r") as rclone_f:
+                _ = main_log.write("\n--- Rclone Log ---\n")
+                _ = main_log.write(rclone_f.read())
+
+        rclone_log.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning(
+            f"Could not process rclone log {rclone_log}: {e} - sync status is unaffected but reported stats may be incomplete."
+        )
+
+    return final_stats, error_lines
+
+
 def _execute_rclone_sync(log_file: Path | None) -> dict[str, str | int]:
     """Execute a single rclone sync operation."""
     start_time = time.monotonic()
@@ -1634,39 +1687,7 @@ def _execute_rclone_sync(log_file: Path | None) -> dict[str, str | int]:
 
     duration = time.monotonic() - start_time
 
-    # Parse stats from the JSON log file
-    final_stats: JsonDict = {}
-    error_lines: list[str] = []
-
-    if rclone_log.exists():
-        with open(rclone_log, "r") as f:
-            for line in f:
-                if not line.strip().startswith("{"):
-                    continue
-                try:
-                    parsed_json: object = json.loads(line)  # pyright: ignore[reportAny]
-                    if not isinstance(parsed_json, dict):
-                        continue
-
-                    log_entry = cast(JsonDict, parsed_json)
-
-                    stats_data = log_entry.get("stats")
-                    if "stats" in log_entry and isinstance(stats_data, dict):
-                        final_stats = stats_data
-
-                    elif log_entry.get("level") == "error":
-                        if (msg := log_entry.get("msg")) and isinstance(msg, str):
-                            error_lines.append(msg)
-                except json.JSONDecodeError:
-                    continue
-
-        # Append rclone log to main log
-        if log_file is not None:
-            with open(log_file, "a") as main_log, open(rclone_log, "r") as rclone_f:
-                _ = main_log.write("\n--- Rclone Log ---\n")
-                _ = main_log.write(rclone_f.read())
-
-        rclone_log.unlink(missing_ok=True)
+    final_stats, error_lines = _process_rclone_log(rclone_log, log_file)
 
     # Extract stats safely
     transfers = final_stats.get("transfers", 0)

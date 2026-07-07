@@ -101,6 +101,37 @@ class TestPipelineSpawnFailure(ScriptTestCase):
         self.assertEqual(len(mod._active_processes), 0)
 
 
+class TestRcloneLogProcessing(ScriptTestCase):
+    def test_parses_stats_and_errors_and_cleans_up(self):
+        rclone_log = self.tmp / "run.rclone.log"
+        rclone_log.write_text(
+            'not json\n'
+            '{"level": "error", "msg": "upload failed once"}\n'
+            '{"stats": {"transfers": 2, "bytes": 1024, "errors": 1, "checks": 3, "totalBytes": 4096}}\n'
+        )
+        main_log = self.tmp / "main.log"
+        main_log.write_text("existing\n")
+        stats, errors = mod._process_rclone_log(rclone_log, main_log)
+        self.assertEqual(stats["transfers"], 2)
+        self.assertEqual(errors, ["upload failed once"])
+        self.assertIn("--- Rclone Log ---", main_log.read_text())
+        self.assertFalse(rclone_log.exists())
+
+    def test_missing_log_returns_empty(self):
+        stats, errors = mod._process_rclone_log(self.tmp / "absent.log", None)
+        self.assertEqual(stats, {})
+        self.assertEqual(errors, [])
+
+    def test_filesystem_error_does_not_raise(self):
+        # A directory triggers IsADirectoryError on open() - the helper must
+        # contain it so a log-processing hiccup cannot fail the sync attempt.
+        as_directory = self.tmp / "log-is-a-dir"
+        as_directory.mkdir()
+        stats, errors = mod._process_rclone_log(as_directory, None)
+        self.assertEqual(stats, {})
+        self.assertEqual(errors, [])
+
+
 class TestDockerQueryFailure(ScriptTestCase):
     def test_query_error_returns_none_not_empty(self):
         # An unreachable Docker daemon must be distinguishable from
