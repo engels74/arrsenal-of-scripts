@@ -1248,8 +1248,13 @@ def create_backup_maintenance_window() -> int | None:
         return None
 
 
-def remove_backup_maintenance_window() -> None:
-    """Remove the backup maintenance window."""
+def remove_backup_maintenance_window(maintenance_id: int | None = None) -> None:
+    """Remove the backup maintenance window.
+
+    Prefers the persisted ID file, but falls back to an in-memory ID (from
+    the current run's backup state) so cleanup still happens when the ID
+    file could not be written.
+    """
     if not config.uptime_kuma_enabled or dry_run_mode:
         if dry_run_mode:
             log.info("DRY RUN: Skipping maintenance window removal.")
@@ -1263,13 +1268,17 @@ def remove_backup_maintenance_window() -> None:
 
     try:
         id_file = maintenance_id_file()
-        if not id_file.exists():
+        if id_file.exists():
+            maintenance_id = int(id_file.read_text().strip())
+        elif maintenance_id is None:
             log.warning(
                 "No maintenance ID file found. Maintenance window may not have been created."
             )
             return
-
-        maintenance_id = int(id_file.read_text().strip())
+        else:
+            log.warning(
+                "No maintenance ID file found; using the in-memory maintenance ID from this run."
+            )
 
         log.info(f"Removing maintenance window with ID: {maintenance_id}")
 
@@ -1286,10 +1295,8 @@ def remove_backup_maintenance_window() -> None:
             log.info(f"Maintenance window deleted. Result: {result}")
 
         try:
-            id_file.unlink()
+            id_file.unlink(missing_ok=True)
             log.info("Maintenance ID file removed")
-        except FileNotFoundError:
-            log.warning("Maintenance ID file already removed")
         except Exception as e:
             log.warning(f"Failed to remove maintenance ID file: {e}")
 
@@ -2234,7 +2241,16 @@ def create_backup(backup_file: Path) -> bool:
     removing the need for free space equal to the uncompressed data size.
     """
     if dry_run_mode:
-        log.info("DRY RUN: Skipping backup creation.")
+        # Still validate the source configuration so a dry run catches
+        # "no valid sources" instead of reporting success.
+        valid_sources, _ = _effective_backup_sources()
+        if not valid_sources:
+            log.warning("DRY RUN: No valid backup sources found - a real run would fail.")
+            backup_state.add_error("No valid backup sources found - a real run would fail.")
+        else:
+            log.info(
+                f"DRY RUN: Would back up {len(valid_sources)} source(s); skipping backup creation."
+            )
         return True
 
     log.info("Starting backup creation process...")
@@ -2583,8 +2599,13 @@ def run_restore(
         if output_dir is None:
             log.critical("--output-dir is required when extracting (or use --list).")
             return 1
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if any(output_dir.iterdir()) and not force:
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_dir_empty = not any(output_dir.iterdir())
+        except OSError as e:
+            log.critical(f"Cannot prepare output directory {output_dir}: {e}")
+            return 1
+        if not output_dir_empty and not force:
             log.critical(
                 f"Output directory {output_dir} is not empty. Use --force to extract anyway."
             )
@@ -2681,7 +2702,7 @@ def _finalize_run(success: bool, log_file: Path | None) -> None:
     backup_state.stage = BackupStage.CLEANUP
     if backup_state.maintenance_window_id is not None:
         log.info("Removing maintenance window...")
-        remove_backup_maintenance_window()
+        remove_backup_maintenance_window(backup_state.maintenance_window_id)
 
     # Send final status notification (single PrivateBin upload happens here)
     send_final_status_notification(success, log_file)

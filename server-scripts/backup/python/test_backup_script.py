@@ -154,6 +154,11 @@ class TestConfigLoading(ScriptTestCase):
         return path
 
     def test_missing_default_path_uses_defaults(self):
+        # Point the default path into the temp dir so the test does not pick
+        # up a real /etc/backup-script.toml on machines that have one.
+        original = mod.DEFAULT_CONFIG_PATH
+        mod.DEFAULT_CONFIG_PATH = self.tmp / "absent.toml"
+        self.addCleanup(setattr, mod, "DEFAULT_CONFIG_PATH", original)
         cfg = mod.load_config(None)
         self.assertEqual(cfg, mod.Config())
 
