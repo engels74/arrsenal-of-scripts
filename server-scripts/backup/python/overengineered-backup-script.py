@@ -156,6 +156,7 @@ ENV_DISCORD_WEBHOOK_URL = "BACKUP_DISCORD_WEBHOOK_URL"
 BACKUP_CREATE_TIMEOUT = 7200
 BACKUP_VERIFY_TIMEOUT = 1800
 RESTORE_TIMEOUT = 7200
+WATCHDOG_KILL_GRACE_SECONDS = 30
 
 
 @dataclass(slots=True)
@@ -734,6 +735,16 @@ def terminate_active_processes() -> None:
             proc.terminate()
 
 
+def kill_active_processes() -> None:
+    """SIGKILL all currently tracked subprocesses - the escalation path for
+    children that ignore SIGTERM."""
+    with _process_lock:
+        procs = list(_active_processes)
+    for proc in procs:
+        with contextlib.suppress(OSError):
+            proc.kill()
+
+
 def run_command(
     command: list[str],
     timeout: float,
@@ -885,6 +896,11 @@ def _watchdog_fired() -> None:
     )
     shutdown_requested = True
     terminate_active_processes()
+    # If a subprocess ignores SIGTERM, escalate to SIGKILL so the overall
+    # timeout guarantee holds even for unresponsive children.
+    killer = threading.Timer(WATCHDOG_KILL_GRACE_SECONDS, kill_active_processes)
+    killer.daemon = True
+    killer.start()
 
 
 def start_watchdog() -> threading.Timer:
@@ -1861,16 +1877,20 @@ def get_docker_compose_files() -> tuple[list[Path], list[Path]]:
     return plex_files, other_files
 
 
-def get_running_container_ids() -> list[str]:
-    """Get list of all running container IDs."""
+def get_running_container_ids() -> list[str] | None:
+    """Get list of all running container IDs.
+
+    Returns None when Docker cannot be queried - callers must not confuse
+    that with "zero containers running".
+    """
     try:
         result = run_command([resolve_command("docker"), "ps", "-q"], timeout=30)
     except (subprocess.TimeoutExpired, OSError) as e:
         log.error(f"Failed to get running containers: {e}")
-        return []
+        return None
     if result.returncode != 0:
         log.error(f"Failed to get running containers: {result.stderr}")
-        return []
+        return None
     return [cid.strip() for cid in result.stdout.strip().split("\n") if cid.strip()]
 
 
@@ -2056,6 +2076,9 @@ def ensure_all_containers_stopped(
             break
 
         initial_containers = get_running_container_ids()
+        if initial_containers is None:
+            log.error("Cannot query Docker for running containers; will retry.")
+            continue
         if not initial_containers:
             log.info("No running containers found. Nothing to stop.")
             return True
@@ -2072,6 +2095,9 @@ def ensure_all_containers_stopped(
         _ = manage_docker_services(compose_files, "stop")
 
         remaining = get_running_container_ids()
+        if remaining is None:
+            log.error("Cannot verify container state after compose down; will retry.")
+            continue
         if not remaining:
             log.info("✓ All containers stopped successfully via docker compose.")
             return True
@@ -2087,6 +2113,9 @@ def ensure_all_containers_stopped(
         time.sleep(config.docker_verify_shutdown_interval)
 
         remaining = get_running_container_ids()
+        if remaining is None:
+            log.error("Cannot verify container state after docker stop; will retry.")
+            continue
         if not remaining:
             log.info("✓ All containers stopped successfully via docker stop.")
             return True
@@ -2102,6 +2131,9 @@ def ensure_all_containers_stopped(
         time.sleep(config.docker_kill_wait_time)
 
         final_remaining = get_running_container_ids()
+        if final_remaining is None:
+            log.error("Cannot verify container state after docker kill; will retry.")
+            continue
         if not final_remaining:
             log.info("✓ All containers stopped successfully via docker kill.")
             return True
@@ -2112,6 +2144,14 @@ def ensure_all_containers_stopped(
 
     # All retries exhausted
     final_remaining = get_running_container_ids()
+    if final_remaining is None:
+        log.critical(
+            "CRITICAL: Unable to verify container shutdown state - Docker cannot be queried!"
+        )
+        backup_state.add_warning(
+            "Container shutdown state unknown: Docker could not be queried"
+        )
+        return False
     if final_remaining:
         container_list = _describe_containers(final_remaining)
         log.critical(
@@ -2473,7 +2513,8 @@ def emergency_container_restart() -> None:
         # Verify some containers are running
         time.sleep(10)
         running = get_running_container_ids()
-        log.info(f"Emergency restart complete. {len(running)} container(s) now running.")
+        count = "unknown (Docker query failed)" if running is None else str(len(running))
+        log.info(f"Emergency restart complete. {count} container(s) now running.")
 
     except Exception as e:
         log.critical(f"Emergency container restart failed: {e}")
@@ -2686,13 +2727,19 @@ def _finalize_run(success: bool, log_file: Path | None) -> None:
             # Verify services are running
             time.sleep(5)
             running = get_running_container_ids()
-            log.info(f"Service restart complete. {len(running)} container(s) running.")
-
-            if not running:
-                log.critical(
-                    "No containers running after restart! Attempting emergency recovery..."
+            if running is None:
+                log.warning(
+                    "Could not verify running containers after restart (Docker query failed)."
                 )
-                emergency_container_restart()
+            else:
+                log.info(
+                    f"Service restart complete. {len(running)} container(s) running."
+                )
+                if not running:
+                    log.critical(
+                        "No containers running after restart! Attempting emergency recovery..."
+                    )
+                    emergency_container_restart()
 
         except Exception as e:
             log.critical(f"Failed to restart services: {e}")

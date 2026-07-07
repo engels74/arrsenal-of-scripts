@@ -101,6 +101,20 @@ class TestPipelineSpawnFailure(ScriptTestCase):
         self.assertEqual(len(mod._active_processes), 0)
 
 
+class TestDockerQueryFailure(ScriptTestCase):
+    def test_query_error_returns_none_not_empty(self):
+        # An unreachable Docker daemon must be distinguishable from
+        # "zero containers running".
+        original = mod.run_command
+
+        def boom(*_args: object, **_kwargs: object) -> object:
+            raise OSError("docker unreachable")
+
+        mod.run_command = boom
+        self.addCleanup(setattr, mod, "run_command", original)
+        self.assertIsNone(mod.get_running_container_ids())
+
+
 class TestPreFlightDryRun(ScriptTestCase):
     def test_invalid_compression_tool_is_aggregated_not_raised(self):
         mod.dry_run_mode = True
