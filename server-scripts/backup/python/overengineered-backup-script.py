@@ -1870,7 +1870,7 @@ def pre_flight_checks() -> None:
     identity = config.age_identity_file
     if not identity.is_file() or identity.stat().st_size == 0:
         problem(
-            f"age identity file not found or empty: {identity}. Create it with: age-keygen -pq -o {identity} && chmod 600 {identity} - and KEEP A COPY OFF THIS MACHINE (lost key = unreadable backups)."
+            f"age identity file not found or empty: {identity}. Create it with: age-keygen -pq -o {identity} && chmod 600 {identity} (the -pq flag requires age >= 1.3.0) - and KEEP A COPY OFF THIS MACHINE (lost key = unreadable backups)."
         )
     else:
         mode = identity.stat().st_mode & 0o777
@@ -2664,7 +2664,7 @@ def send_final_status_notification(success: bool, log_file: Path | None) -> None
 def _decrypt_stage(backup_file: Path, identity: Path) -> tuple[str, list[str]]:
     """Build the age-decrypt first stage of the restore pipeline."""
     name = backup_file.name
-    if not name.endswith(".age"):
+    if not name.endswith(".tar.gz.age"):
         raise BackupError(
             f"Unsupported backup format: {name} (expected *.tar.gz.age)"
         )
