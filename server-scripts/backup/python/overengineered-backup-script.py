@@ -785,25 +785,39 @@ def run_pipeline(
         err_files: list[IO[bytes]] = []
 
         prev_stdout: IO[bytes] | None = stdin_first
-        for i, (name, cmd) in enumerate(stages):
-            err_file = stack.enter_context(open(errdir / f"{i}-{name}.stderr", "w+b"))
-            err_files.append(err_file)
-            is_last = i == len(stages) - 1
-            proc = subprocess.Popen(
-                cmd,
-                stdin=prev_stdout,
-                stdout=stdout_final if is_last else subprocess.PIPE,
-                stderr=err_file,
-            )
-            procs.append(proc)
-            _track_process(proc)
-            # Close the parent's copy of the previous stage's stdout so EOF
-            # propagates correctly through the pipeline.
-            if i > 0:
-                prev_proc_stdout = procs[i - 1].stdout
-                if prev_proc_stdout is not None:
-                    prev_proc_stdout.close()
-            prev_stdout = proc.stdout
+        try:
+            for i, (name, cmd) in enumerate(stages):
+                err_file = stack.enter_context(
+                    open(errdir / f"{i}-{name}.stderr", "w+b")
+                )
+                err_files.append(err_file)
+                is_last = i == len(stages) - 1
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=prev_stdout,
+                    stdout=stdout_final if is_last else subprocess.PIPE,
+                    stderr=err_file,
+                )
+                procs.append(proc)
+                _track_process(proc)
+                # Close the parent's copy of the previous stage's stdout so
+                # EOF propagates correctly through the pipeline.
+                if i > 0:
+                    prev_proc_stdout = procs[i - 1].stdout
+                    if prev_proc_stdout is not None:
+                        prev_proc_stdout.close()
+                prev_stdout = proc.stdout
+        except OSError:
+            # A stage failed to spawn (e.g. missing binary): kill and untrack
+            # the stages already started so no orphaned processes remain.
+            for proc in procs:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+            for proc in procs:
+                _untrack_process(proc)
+                with contextlib.suppress(Exception):
+                    _ = proc.wait(timeout=10)
+            raise
 
         try:
             deadline = time.monotonic() + timeout
@@ -1737,7 +1751,7 @@ def pre_flight_checks() -> None:
         problem("This script must be run as root.")
 
     if config.compression_tool not in ("gzip", "pigz"):
-        raise PreFlightError(
+        problem(
             f"Invalid compression_tool: {config.compression_tool}. Must be 'gzip' or 'pigz'."
         )
 
@@ -1802,6 +1816,12 @@ def pre_flight_checks() -> None:
         if problems:
             log.warning(
                 f"DRY RUN: {len(problems)} pre-flight problem(s) found - a real run would fail."
+            )
+            # Recorded as an error so the dry run exits non-zero and can be
+            # used as an automated "would tonight's run work?" health check.
+            backup_state.add_error(
+                f"Dry-run pre-flight found {len(problems)} problem(s): "
+                + "; ".join(problems)
             )
         else:
             log.info("DRY RUN: All pre-flight checks would pass.")
@@ -2586,6 +2606,9 @@ def run_restore(
             )
     except OperationTimeout as e:
         log.critical(str(e))
+        return 1
+    except OSError as e:
+        log.critical(f"Failed to run the restore pipeline: {e}")
         return 1
     except KeyboardInterrupt:
         log.warning("Restore interrupted.")

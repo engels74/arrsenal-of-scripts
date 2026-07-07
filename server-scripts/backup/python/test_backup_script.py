@@ -88,6 +88,38 @@ class TestPathHelpers(ScriptTestCase):
         self.assertFalse(mod.tar_is_gnu("/nonexistent/definitely-not-tar"))
 
 
+class TestPipelineSpawnFailure(ScriptTestCase):
+    def test_failed_spawn_kills_earlier_stages(self):
+        stages = [
+            ("cat", ["/bin/cat"]),
+            ("missing", ["/nonexistent/definitely-not-a-binary"]),
+        ]
+        with open(os.devnull, "rb") as devnull:
+            with self.assertRaises(OSError):
+                mod.run_pipeline(stages, timeout=10, stdin_first=devnull)
+        # The already-started stage must be killed and untracked.
+        self.assertEqual(len(mod._active_processes), 0)
+
+
+class TestPreFlightDryRun(ScriptTestCase):
+    def test_invalid_compression_tool_is_aggregated_not_raised(self):
+        mod.dry_run_mode = True
+        mod.config.compression_tool = "zstd"
+        mod.pre_flight_checks()  # must not raise in dry-run mode
+        self.assertTrue(mod.backup_state.errors)
+        self.assertIn("Invalid compression_tool", mod.backup_state.errors[0])
+
+    def test_dry_run_problems_are_recorded_as_errors(self):
+        # On any non-root test machine at least the root check fails, so the
+        # dry run must record an error (=> non-zero exit) instead of only
+        # logging warnings.
+        if os.geteuid() == 0:
+            self.skipTest("running as root; no guaranteed pre-flight problem")
+        mod.dry_run_mode = True
+        mod.pre_flight_checks()
+        self.assertTrue(mod.backup_state.has_critical_errors)
+
+
 class TestRcloneRetryClassification(ScriptTestCase):
     def test_non_retryable_codes(self):
         for code in (1, 3, 4, 7):
