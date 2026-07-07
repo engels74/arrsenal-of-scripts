@@ -592,6 +592,17 @@ class TestIdentityClassification(ScriptTestCase):
     def test_unknown_when_unreadable(self):
         self.assertIsNone(mod._identity_is_post_quantum(self.tmp / "missing.txt"))
 
+    def test_detects_mixed_keys(self):
+        key = self.tmp / "mixed.txt"
+        key.write_text(
+            "AGE-SECRET-KEY-PQ-1EXAMPLEEXAMPLEEXAMPLE\n"
+            "AGE-SECRET-KEY-1EXAMPLEEXAMPLEEXAMPLE\n"
+        )
+        # A mixed file is flagged distinctly (age refuses to encrypt to both),
+        # while the ternary classifier still reports True (a PQ key is present).
+        self.assertEqual(mod._scan_identity_key_types(key), (True, True))
+        self.assertIs(mod._identity_is_post_quantum(key), True)
+
 
 @unittest.skipUnless(_age_supports_pq(), "age-keygen -pq (age >= 1.3.0) required")
 class TestPostQuantumRoundTrip(ScriptTestCase):

@@ -1784,11 +1784,12 @@ def _report_backup_sources() -> None:
         log.info(f"  excluded  {excl}{'' if excl.exists() else ' (not present)'}")
 
 
-def _identity_is_post_quantum(identity: Path) -> bool | None:
-    """Classify an age identity file: True if it holds a post-quantum secret
-    key (AGE-SECRET-KEY-PQ-...), False if it holds a classic X25519 key
-    (AGE-SECRET-KEY-1...), or None if the type can't be determined (e.g. a
-    plugin identity, or the file can't be read)."""
+def _scan_identity_key_types(identity: Path) -> tuple[bool, bool] | None:
+    """Scan an age identity file, returning (has_post_quantum, has_classic),
+    or None if the file can't be read. A file may contain both (e.g. a
+    post-quantum key appended next to a classic one to keep decrypting old
+    backups); age refuses to encrypt to such a mix, so callers treat that
+    case specially."""
     try:
         text = identity.read_text(errors="replace")
     except OSError:
@@ -1800,6 +1801,19 @@ def _identity_is_post_quantum(identity: Path) -> bool | None:
             has_pq = True
         elif stripped.startswith("AGE-SECRET-KEY-1"):
             has_classic = True
+    return has_pq, has_classic
+
+
+def _identity_is_post_quantum(identity: Path) -> bool | None:
+    """Classify an age identity file: True if it holds a post-quantum secret
+    key (AGE-SECRET-KEY-PQ-...), False if it holds a classic X25519 key
+    (AGE-SECRET-KEY-1...), or None if the type can't be determined (e.g. a
+    plugin identity, or the file can't be read). A file mixing both key types
+    classifies as True (a post-quantum key is present)."""
+    flags = _scan_identity_key_types(identity)
+    if flags is None:
+        return None
+    has_pq, has_classic = flags
     if has_pq:
         return True
     if has_classic:
@@ -1878,12 +1892,23 @@ def pre_flight_checks() -> None:
             log.warning(
                 f"age identity file {identity} has loose permissions ({mode:o}); consider: chmod 600 {identity}"
             )
-        if _identity_is_post_quantum(identity) is False:
-            log.warning(
-                f"age identity file {identity} is a classic X25519 key, so new "
-                f"backups will NOT be post-quantum. Regenerate with: "
-                f"age-keygen -pq -o {identity}"
-            )
+        key_types = _scan_identity_key_types(identity)
+        if key_types is not None:
+            has_pq, has_classic = key_types
+            if has_pq and has_classic:
+                log.warning(
+                    f"age identity file {identity} mixes post-quantum and classic "
+                    f"identities; age refuses to encrypt to both (incompatible "
+                    f"recipients), so new backups will FAIL. Remove the classic "
+                    f"AGE-SECRET-KEY-1... line (or regenerate with: "
+                    f"age-keygen -pq -o {identity})."
+                )
+            elif has_classic:
+                log.warning(
+                    f"age identity file {identity} is a classic X25519 key, so new "
+                    f"backups will NOT be post-quantum. Regenerate with: "
+                    f"age-keygen -pq -o {identity}"
+                )
 
     try:
         _ = pwd.getpwnam(config.backup_user)
