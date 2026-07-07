@@ -40,6 +40,17 @@ def _tar_is_gnu() -> bool:
     return mod.tar_is_gnu(mod.resolve_tar())
 
 
+def _age_supports_pq() -> bool:
+    """True if the installed age-keygen can mint post-quantum (-pq) keys."""
+    if not AGE_KEYGEN:
+        return False
+    try:
+        result = subprocess.run([AGE_KEYGEN, "-pq"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and b"AGE-SECRET-KEY-PQ-" in result.stdout
+
+
 def setUpModule() -> None:
     logging.disable(logging.CRITICAL)
 
@@ -161,6 +172,39 @@ class TestPreFlightDryRun(ScriptTestCase):
         self.assertTrue(mod.backup_state.errors)
         self.assertIn("Invalid docker shutdown_method", mod.backup_state.errors[0])
 
+    def test_mixed_identity_is_aggregated_not_raised(self):
+        # A post-quantum + classic mix makes age refuse to encrypt (incompatible
+        # recipients), so pre-flight must fail fast rather than warn-and-continue.
+        identity = self.tmp / "mixed.txt"
+        identity.write_text(
+            "AGE-SECRET-KEY-PQ-1EXAMPLEEXAMPLEEXAMPLE\n"
+            "AGE-SECRET-KEY-1EXAMPLEEXAMPLEEXAMPLE\n"
+        )
+        mod.config.age_identity_file = identity
+        mod.dry_run_mode = True
+        mod.pre_flight_checks()  # must not raise in dry-run mode
+        self.assertTrue(mod.backup_state.errors)
+        self.assertIn("mixes post-quantum and classic", mod.backup_state.errors[0])
+
+    def test_unreadable_identity_is_aggregated_not_raised(self):
+        # If the identity exists and is non-empty but can't be read (OSError ->
+        # _scan_identity_key_types returns None), pre-flight must fail fast
+        # instead of silently skipping the key-type check and only failing later
+        # in the age pipeline. Patch the scanner to force the None branch (the
+        # OSError -> None mapping itself is covered by
+        # TestIdentityClassification.test_unknown_when_unreadable), keeping this
+        # test deterministic whether or not it runs as root.
+        identity = self.tmp / "present-but-unreadable.txt"
+        identity.write_text("AGE-SECRET-KEY-PQ-1EXAMPLEEXAMPLEEXAMPLE\n")
+        original = mod._scan_identity_key_types
+        mod._scan_identity_key_types = lambda _identity: None
+        self.addCleanup(setattr, mod, "_scan_identity_key_types", original)
+        mod.config.age_identity_file = identity
+        mod.dry_run_mode = True
+        mod.pre_flight_checks()  # must not raise in dry-run mode
+        self.assertTrue(mod.backup_state.errors)
+        self.assertIn("could not be read", mod.backup_state.errors[0])
+
     def test_dry_run_problems_are_recorded_as_errors(self):
         # On any non-root test machine at least the root check fails, so the
         # dry run must record an error (=> non-zero exit) instead of only
@@ -254,6 +298,24 @@ backup_root_dir = "/custom/backups"
         with self.assertRaises(mod.ConfigError):
             mod.load_config(path)
 
+    def test_removed_legacy_password_file_gives_upgrade_hint(self):
+        # A stale config with the dropped [encryption] legacy_password_file key
+        # must fail with an actionable message, not the bare "unknown key" one.
+        path = self._write('[encryption]\nlegacy_password_file = "/root/.key"\n')
+        with self.assertRaises(mod.ConfigError) as ctx:
+            mod.load_config(path)
+        message = str(ctx.exception)
+        self.assertIn("legacy openssl", message)
+        self.assertIn("Delete it", message)
+
+    def test_unknown_encryption_key_still_generic(self):
+        # A genuinely-unknown key must keep the generic error - the removed-key
+        # special case must not swallow every unknown key in the section.
+        path = self._write('[encryption]\nbogus_key = "x"\n')
+        with self.assertRaises(mod.ConfigError) as ctx:
+            mod.load_config(path)
+        self.assertIn("unknown key", str(ctx.exception))
+
     def test_wrong_type_rejected(self):
         path = self._write('[retention]\nbackups = "three"\n')
         with self.assertRaises(mod.ConfigError):
@@ -310,13 +372,15 @@ class TestRotation(ScriptTestCase):
         self.assertEqual(remaining, sorted(p.name for p in files[3:]))
 
     def test_multiple_patterns_rotate_together(self):
-        old = self._make_files(["old1_backup.tar.gz.enc", "old2_backup.tar.gz.enc"])
-        new = self._make_files(["new1_backup.tar.gz.age", "new2_backup.tar.gz.age"])
+        # rotate_items accepts a list of globs and rotates their union as one
+        # pool, keeping the newest retention_count across all patterns.
+        old = self._make_files(["old1_backup.tar.gz.age", "old2.log"])
+        new = self._make_files(["new1_backup.tar.gz.age", "new2.log"])
         # old files were created first but _make_files re-bases mtimes per
-        # call; force the .enc files to be oldest explicitly.
+        # call; force the old files to be oldest explicitly.
         for p in old:
             os.utime(p, (time.time() - 10_000, time.time() - 10_000))
-        removed = mod.rotate_items(self.tmp, ["*.tar.gz.age", "*.tar.gz.enc"], 2)
+        removed = mod.rotate_items(self.tmp, ["*.tar.gz.age", "*.log"], 2)
         self.assertEqual(sorted(p.name for p in removed), sorted(p.name for p in old))
         self.assertTrue(all(p.exists() for p in new))
 
@@ -465,9 +529,7 @@ class TestRestoreRoundTrip(ScriptTestCase):
             output_dir=None,
             list_only=True,
             force=False,
-            identity=self.identity,
-            password_file=self.tmp / "unused",
-        )
+            identity=self.identity,        )
         self.assertEqual(rc, 0)
 
     def test_restore_extract_and_compare(self):
@@ -477,9 +539,7 @@ class TestRestoreRoundTrip(ScriptTestCase):
             output_dir=out,
             list_only=False,
             force=False,
-            identity=self.identity,
-            password_file=self.tmp / "unused",
-        )
+            identity=self.identity,        )
         self.assertEqual(rc, 0)
         self.assertEqual((out / "src" / "hello.txt").read_text(), "hello world\n")
         self.assertEqual(
@@ -495,9 +555,7 @@ class TestRestoreRoundTrip(ScriptTestCase):
             output_dir=out,
             list_only=False,
             force=False,
-            identity=self.identity,
-            password_file=self.tmp / "unused",
-        )
+            identity=self.identity,        )
         self.assertEqual(rc, 1)
         self.assertEqual((out / "existing.txt").read_text(), "do not clobber")
 
@@ -509,9 +567,7 @@ class TestRestoreRoundTrip(ScriptTestCase):
             output_dir=None,
             list_only=True,
             force=False,
-            identity=self.identity,
-            password_file=self.tmp / "unused",
-        )
+            identity=self.identity,        )
         self.assertEqual(rc, 1)
 
 
@@ -556,13 +612,159 @@ class TestCreateBackupEndToEnd(ScriptTestCase):
             output_dir=out,
             list_only=False,
             force=False,
-            identity=identity,
-            password_file=self.tmp / "unused",
-        )
+            identity=identity,        )
         self.assertEqual(rc, 0)
         restored_root = out / str(src.resolve()).lstrip("/")
         self.assertEqual((restored_root / "a.txt").read_text(), "alpha")
         self.assertFalse((restored_root / "excluded").exists())
+
+
+class TestIdentityClassification(ScriptTestCase):
+    """_identity_is_post_quantum classifies an age identity by key prefix."""
+
+    def test_detects_post_quantum_key(self):
+        key = self.tmp / "pq.txt"
+        key.write_text(
+            "# created: 2025-01-01T00:00:00Z\n"
+            "# public key: age1pq1abc\n"
+            "AGE-SECRET-KEY-PQ-1EXAMPLEEXAMPLEEXAMPLE\n"
+        )
+        self.assertIs(mod._identity_is_post_quantum(key), True)
+
+    def test_detects_classic_key(self):
+        key = self.tmp / "classic.txt"
+        key.write_text(
+            "# created: 2025-01-01T00:00:00Z\n"
+            "# public key: age1abc\n"
+            "AGE-SECRET-KEY-1EXAMPLEEXAMPLEEXAMPLE\n"
+        )
+        self.assertIs(mod._identity_is_post_quantum(key), False)
+
+    def test_unknown_when_unreadable(self):
+        self.assertIsNone(mod._identity_is_post_quantum(self.tmp / "missing.txt"))
+
+    def test_detects_mixed_keys(self):
+        key = self.tmp / "mixed.txt"
+        key.write_text(
+            "AGE-SECRET-KEY-PQ-1EXAMPLEEXAMPLEEXAMPLE\n"
+            "AGE-SECRET-KEY-1EXAMPLEEXAMPLEEXAMPLE\n"
+        )
+        # A mixed file is flagged distinctly (age refuses to encrypt to both),
+        # while the ternary classifier still reports True (a PQ key is present).
+        self.assertEqual(mod._scan_identity_key_types(key), (True, True))
+        self.assertIs(mod._identity_is_post_quantum(key), True)
+
+
+class TestAgeVersionSupportsPq(ScriptTestCase):
+    """_age_version_supports_pq gates the post-quantum pre-flight check: True
+    for age >= 1.3.0, False for older, None when the version is undeterminable
+    (so pre-flight fails open rather than blocking an oddly-versioned age).
+    Stubs run_command so no real age binary is needed."""
+
+    def _stub_version(self, *, stdout="", stderr="", returncode=0):
+        result = subprocess.CompletedProcess(
+            ["age", "--version"], returncode, stdout, stderr
+        )
+        original = mod.run_command
+        mod.run_command = lambda *_a, **_k: result
+        self.addCleanup(setattr, mod, "run_command", original)
+
+    def test_newer_patch_supported(self):
+        self._stub_version(stdout="v1.3.1\n")
+        self.assertIs(mod._age_version_supports_pq("age"), True)
+
+    def test_exact_threshold_supported(self):
+        self._stub_version(stdout="v1.3.0\n")
+        self.assertIs(mod._age_version_supports_pq("age"), True)
+
+    def test_older_minor_unsupported(self):
+        self._stub_version(stdout="v1.2.9\n")
+        self.assertIs(mod._age_version_supports_pq("age"), False)
+
+    def test_much_older_unsupported(self):
+        self._stub_version(stdout="v1.2.0\n")
+        self.assertIs(mod._age_version_supports_pq("age"), False)
+
+    def test_unparseable_version_is_none(self):
+        self._stub_version(stdout="(devel)\n")
+        self.assertIsNone(mod._age_version_supports_pq("age"))
+
+    def test_nonzero_returncode_is_none(self):
+        self._stub_version(stdout="v1.3.1\n", returncode=1)
+        self.assertIsNone(mod._age_version_supports_pq("age"))
+
+    def test_version_read_from_stderr_when_stdout_empty(self):
+        self._stub_version(stdout="", stderr="v1.3.1\n")
+        self.assertIs(mod._age_version_supports_pq("age"), True)
+
+    def test_command_error_is_none(self):
+        original = mod.run_command
+
+        def boom(*_a: object, **_k: object) -> object:
+            raise OSError("age missing")
+
+        mod.run_command = boom
+        self.addCleanup(setattr, mod, "run_command", original)
+        self.assertIsNone(mod._age_version_supports_pq("age"))
+
+
+@unittest.skipUnless(
+    _age_supports_pq() and AGE, "age + age-keygen -pq (age >= 1.3.0) required"
+)
+class TestPostQuantumRoundTrip(ScriptTestCase):
+    """Confirm the encrypt/verify/restore round-trip works with a post-quantum
+    (-pq) age identity - the recipient type the backup pipeline relies on."""
+
+    def test_pq_verify_and_restore(self):
+        identity = self.tmp / "pqkey.txt"
+        subprocess.run(
+            [AGE_KEYGEN, "-pq", "-o", str(identity)],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        identity.chmod(0o600)
+        # Sanity: the generated key really is post-quantum.
+        self.assertIs(mod._identity_is_post_quantum(identity), True)
+
+        src = self.tmp / "src"
+        (src / "sub").mkdir(parents=True)
+        (src / "hello.txt").write_text("pq hello\n")
+
+        # Build fixture archive: tar | gzip | age (no GNU-only flags).
+        backup_file = self.tmp / "pq_backup.tar.gz.age"
+        tar = subprocess.Popen(
+            [mod.resolve_tar(), "-cf", "-", "-C", str(self.tmp), "src"],
+            stdout=subprocess.PIPE,
+        )
+        gz = subprocess.Popen(
+            ["gzip", "-3"], stdin=tar.stdout, stdout=subprocess.PIPE
+        )
+        age = subprocess.Popen(
+            [AGE, "-e", "-i", str(identity), "-o", str(backup_file)],
+            stdin=gz.stdout,
+        )
+        tar.stdout.close()
+        gz.stdout.close()
+        self.assertEqual(age.wait(timeout=60), 0)
+        self.assertEqual(gz.wait(timeout=10), 0)
+        self.assertEqual(tar.wait(timeout=10), 0)
+
+        mod.config.age_identity_file = identity
+        mod.config.compression_tool = "gzip"
+
+        self.assertTrue(mod.verify_backup(backup_file))
+
+        out = self.tmp / "restored"
+        rc = mod.run_restore(
+            backup_file=backup_file,
+            output_dir=out,
+            list_only=False,
+            force=False,
+            identity=identity,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual((out / "src" / "hello.txt").read_text(), "pq hello\n")
 
 
 if __name__ == "__main__":

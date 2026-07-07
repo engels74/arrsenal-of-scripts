@@ -13,14 +13,15 @@
 # A robust, automated backup and off-site upload script using Python.
 #
 # Features:
-# - Creates local encrypted backups via a streaming tar -> pigz/gzip -> age
-#   pipeline (no temporary uncompressed archive on disk).
+# - Creates local backups encrypted with age (post-quantum hybrid X25519 +
+#   ML-KEM-768) via a streaming tar -> pigz/gzip -> age pipeline (no temporary
+#   uncompressed archive on disk).
 # - Manages Docker services, with priority restart for critical containers.
 # - Uploads backups to a cloud remote using rclone.
 # - Sends detailed status notifications to a Discord webhook.
 # - Optionally uploads full logs to PrivateBin for easy debugging.
 # - Robust error handling, log rotation, concurrency locking, and a
-#   built-in restore mode (supports legacy openssl-encrypted backups too).
+#   built-in restore mode.
 #
 # Usage:
 #   sudo ./overengineered-backup-script.py [--config /etc/backup-script.toml]
@@ -31,12 +32,13 @@
 #
 # Requirements:
 # - Python 3.14+ (run via `uv run`; dependencies resolve automatically)
-# - rclone, tar (GNU), pigz/gzip, age, docker
-# - openssl (only needed to restore legacy .enc backups)
+# - rclone, tar (GNU), pigz/gzip, age (>= 1.3.0 for post-quantum keys), docker
 # - (Optional) privatebin (from gearnode/privatebin)
 #
 # Encryption key setup (one time):
-#   age-keygen -o /root/.backup_age_key.txt && chmod 600 /root/.backup_age_key.txt
+#   age-keygen -pq -o /root/.backup_age_key.txt && chmod 600 /root/.backup_age_key.txt
+#   The -pq flag creates a post-quantum hybrid identity (age v1.3.0+); the
+#   backup pipeline encrypts to this identity's own recipient automatically.
 #   !! Copy the key somewhere safe OFF this machine - if the key is lost,
 #   !! every backup encrypted with it is permanently unreadable.
 # -----------------------------------------------------------------------------
@@ -52,6 +54,7 @@ import json
 import logging
 import os
 import pwd
+import re
 import shutil
 import signal
 import subprocess
@@ -201,7 +204,6 @@ class Config:
 
     # [encryption]
     age_identity_file: Path = Path("/root/.backup_age_key.txt")
-    legacy_password_file: Path = Path("/root/.backup_password")
 
     # [docker]
     docker_enabled: bool = True
@@ -272,7 +274,6 @@ _TOML_SCHEMA: dict[str, dict[str, str]] = {
     },
     "encryption": {
         "age_identity_file": "age_identity_file",
-        "legacy_password_file": "legacy_password_file",
     },
     "docker": {
         "enabled": "docker_enabled",
@@ -324,6 +325,18 @@ _TOML_SCHEMA: dict[str, dict[str, str]] = {
 
 _PATH_LIST_ATTRS = {"backup_sources", "backup_exclusions"}
 
+# Config keys removed in past breaking changes, keyed by (section, key). Lets
+# _apply_toml give a targeted upgrade hint for a stale config instead of the
+# generic "unknown key" message (the removal only lives in git history otherwise).
+_REMOVED_TOML_KEYS: dict[tuple[str, str], str] = {
+    ("encryption", "legacy_password_file"): (
+        "the legacy openssl (.enc) encryption path was removed, so this key no "
+        "longer exists. Delete it from your config to run backups again; normal "
+        "age-based backups are unaffected. To read old .enc backups, decrypt them "
+        "manually with openssl."
+    ),
+}
+
 
 def _apply_toml(cfg: Config, data: dict[str, object], source: Path) -> None:
     """Apply a parsed TOML document onto a Config, validating every key."""
@@ -336,6 +349,9 @@ def _apply_toml(cfg: Config, data: dict[str, object], source: Path) -> None:
         for key, value in cast(dict[str, object], table).items():
             attr = section_schema.get(key)
             if attr is None:
+                hint = _REMOVED_TOML_KEYS.get((section, key))
+                if hint is not None:
+                    raise ConfigError(f"{source}: [{section}] {key} - {hint}")
                 raise ConfigError(f"{source}: unknown key '{key}' in [{section}]")
             default = cast(object, getattr(cfg, attr))
             if isinstance(default, Path):
@@ -461,11 +477,10 @@ compression_level = {c.compression_level}
 
 [encryption]
 # age identity (private key) used to encrypt and decrypt backups.
-# Generate with: age-keygen -o {c.age_identity_file} && chmod 600 {c.age_identity_file}
+# Generate a post-quantum hybrid key (age v1.3.0+) with:
+#   age-keygen -pq -o {c.age_identity_file} && chmod 600 {c.age_identity_file}
 # KEEP A COPY OF THIS KEY OFF THIS MACHINE - lost key means unreadable backups.
 age_identity_file = "{c.age_identity_file}"
-# Password file for restoring legacy openssl-encrypted (.enc) backups.
-legacy_password_file = "{c.legacy_password_file}"
 
 [docker]
 enabled = {b(c.docker_enabled)}
@@ -1785,6 +1800,62 @@ def _report_backup_sources() -> None:
         log.info(f"  excluded  {excl}{'' if excl.exists() else ' (not present)'}")
 
 
+def _scan_identity_key_types(identity: Path) -> tuple[bool, bool] | None:
+    """Scan an age identity file, returning (has_post_quantum, has_classic),
+    or None if the file can't be read. A file may contain both (e.g. a
+    post-quantum key appended next to a classic one to keep decrypting old
+    backups); age refuses to encrypt to such a mix, so callers treat that
+    case specially."""
+    try:
+        text = identity.read_text(errors="replace")
+    except OSError:
+        return None
+    has_pq = has_classic = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("AGE-SECRET-KEY-PQ-"):
+            has_pq = True
+        elif stripped.startswith("AGE-SECRET-KEY-1"):
+            has_classic = True
+    return has_pq, has_classic
+
+
+def _identity_is_post_quantum(identity: Path) -> bool | None:
+    """Classify an age identity file: True if it holds a post-quantum secret
+    key (AGE-SECRET-KEY-PQ-...), False if it holds a classic X25519 key
+    (AGE-SECRET-KEY-1...), or None if the type can't be determined (e.g. a
+    plugin identity, or the file can't be read). A file mixing both key types
+    classifies as True (a post-quantum key is present)."""
+    flags = _scan_identity_key_types(identity)
+    if flags is None:
+        return None
+    has_pq, has_classic = flags
+    if has_pq:
+        return True
+    if has_classic:
+        return False
+    return None
+
+
+def _age_version_supports_pq(age_path: str) -> bool | None:
+    """Return True if `age --version` reports >= 1.3.0 (post-quantum capable),
+    False if it reports an older version, or None if the version can't be
+    determined (--version failed, or the output wasn't parseable). age >= 1.3.0
+    is required to encrypt/decrypt post-quantum (AGE-SECRET-KEY-PQ-) identities."""
+    try:
+        result = run_command([age_path, "--version"], timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # age prints e.g. "v1.3.1" on stdout; fall back to stderr if stdout is empty.
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout or result.stderr)
+    if not match:
+        return None
+    version = tuple(int(part) for part in match.groups())
+    return version >= (1, 3, 0)
+
+
 def pre_flight_checks() -> None:
     """Perform pre-flight checks before starting backup.
 
@@ -1848,7 +1919,7 @@ def pre_flight_checks() -> None:
     identity = config.age_identity_file
     if not identity.is_file() or identity.stat().st_size == 0:
         problem(
-            f"age identity file not found or empty: {identity}. Create it with: age-keygen -o {identity} && chmod 600 {identity} - and KEEP A COPY OFF THIS MACHINE (lost key = unreadable backups)."
+            f"age identity file not found or empty: {identity}. Create it with: age-keygen -pq -o {identity} && chmod 600 {identity} (the -pq flag requires age >= 1.3.0) - and KEEP A COPY OFF THIS MACHINE (lost key = unreadable backups)."
         )
     else:
         mode = identity.stat().st_mode & 0o777
@@ -1856,6 +1927,48 @@ def pre_flight_checks() -> None:
             log.warning(
                 f"age identity file {identity} has loose permissions ({mode:o}); consider: chmod 600 {identity}"
             )
+        key_types = _scan_identity_key_types(identity)
+        if key_types is None:
+            problem(
+                f"age identity file {identity} exists but could not be read "
+                f"(permission or I/O error); cannot verify its key type, and "
+                f"the backup run would later fail when age tries to use it. Fix "
+                f"ownership/permissions so root can read it (e.g. chmod 600 {identity})."
+            )
+        else:
+            has_pq, has_classic = key_types
+            if has_pq and has_classic:
+                problem(
+                    f"age identity file {identity} mixes post-quantum and classic "
+                    f"identities; age refuses to encrypt to both (incompatible "
+                    f"recipients), so new backups will FAIL. Remove the classic "
+                    f"AGE-SECRET-KEY-1... line - but keep a copy of that classic key "
+                    f"somewhere safe first, since you'll still need it to restore "
+                    f"older classic-encrypted backups - or regenerate with: "
+                    f"age-keygen -pq -o {identity}."
+                )
+            elif has_pq:
+                age_path = find_command("age")
+                supports = _age_version_supports_pq(age_path) if age_path else None
+                if supports is False:
+                    problem(
+                        f"age identity file {identity} is post-quantum, but the "
+                        f"installed age is older than 1.3.0 and cannot use it; the "
+                        f"backup would fail at the encryption stage. Upgrade age to "
+                        f">= 1.3.0."
+                    )
+                elif supports is None:
+                    log.warning(
+                        f"could not determine the installed age version; age >= 1.3.0 "
+                        f"is required to use the post-quantum identity {identity}. If "
+                        f"your age is older, backups will fail at encryption."
+                    )
+            elif has_classic:
+                log.warning(
+                    f"age identity file {identity} is a classic X25519 key, so new "
+                    f"backups will NOT be post-quantum. Regenerate with: "
+                    f"age-keygen -pq -o {identity}"
+                )
 
     try:
         _ = pwd.getpwnam(config.backup_user)
@@ -2633,44 +2746,18 @@ def send_final_status_notification(success: bool, log_file: Path | None) -> None
 # -----------------------------------------------------------------------------
 
 
-def _decrypt_stage(
-    backup_file: Path, identity: Path, password_file: Path
-) -> tuple[str, list[str]]:
-    """Build the first pipeline stage for restoring a backup, based on its
-    format: .age (current) or legacy openssl .enc."""
+def _decrypt_stage(backup_file: Path, identity: Path) -> tuple[str, list[str]]:
+    """Build the age-decrypt first stage of the restore pipeline."""
     name = backup_file.name
-    if name.endswith(".age"):
-        if not identity.is_file():
-            raise BackupError(
-                f"age identity file not found: {identity} (use --identity PATH)"
-            )
-        return (
-            "age",
-            [resolve_command("age"), "-d", "-i", str(identity)],
+    if not name.endswith(".tar.gz.age"):
+        raise BackupError(
+            f"Unsupported backup format: {name} (expected *.tar.gz.age)"
         )
-    if name.endswith(".enc"):
-        if not password_file.is_file():
-            raise BackupError(
-                f"Password file not found: {password_file} (use --password-file PATH)"
-            )
-        # Must match exactly how legacy backups were created (no -iter flag).
-        return (
-            "openssl",
-            [
-                resolve_command("openssl"),
-                "enc",
-                "-d",
-                "-aes-256-cbc",
-                "-md",
-                "sha256",
-                "-pass",
-                f"file:{password_file.resolve()}",
-                "-pbkdf2",
-            ],
+    if not identity.is_file():
+        raise BackupError(
+            f"age identity file not found: {identity} (use --identity PATH)"
         )
-    raise BackupError(
-        f"Unsupported backup format: {name} (expected *.tar.gz.age or *.tar.gz.enc)"
-    )
+    return ("age", [resolve_command("age"), "-d", "-i", str(identity)])
 
 
 def run_restore(
@@ -2679,7 +2766,6 @@ def run_restore(
     list_only: bool,
     force: bool,
     identity: Path,
-    password_file: Path,
 ) -> int:
     """List or extract a backup archive. Returns a process exit code."""
     if not backup_file.is_file():
@@ -2687,7 +2773,7 @@ def run_restore(
         return 1
 
     try:
-        decrypt = _decrypt_stage(backup_file, identity, password_file)
+        decrypt = _decrypt_stage(backup_file, identity)
     except BackupError as e:
         log.critical(str(e))
         return 1
@@ -2906,7 +2992,7 @@ def _run_backup(timestamp: str, log_file: Path | None) -> int:
         if backup_state.backup_verified:
             _ = rotate_items(
                 config.backup_root_dir,
-                ["*.tar.gz.age", "*.tar.gz.enc"],
+                "*.tar.gz.age",
                 config.retention_backups,
             )
             cleanup_orphan_manifests(config.backup_root_dir)
@@ -3022,7 +3108,6 @@ class CliArgs(argparse.Namespace):
     list_contents: bool = False
     force: bool = False
     identity: Path | None = None
-    password_file: Path | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3095,13 +3180,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="age identity file (default: from config).",
-    )
-    _ = restore.add_argument(
-        "--password-file",
-        type=Path,
-        default=None,
-        metavar="PATH",
-        help="Password file for legacy .enc backups (default: from config).",
     )
     _ = restore.add_argument(
         "--verbose", action="store_true", help="Enable debug logging."
@@ -3188,7 +3266,6 @@ def cmd_restore(args: CliArgs) -> int:
         list_only=args.list_contents,
         force=args.force,
         identity=args.identity or config.age_identity_file,
-        password_file=args.password_file or config.legacy_password_file,
     )
 
 
