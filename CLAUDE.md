@@ -32,7 +32,7 @@ python server-scripts/backup/python/test_backup_script.py
 - Use `gum` for interactive TUI elements in hotio scripts
 
 ### Python Scripts
-- Python 3.13+ required (uses inline script metadata with `# /// script`)
+- Python 3.14+ required (uses inline script metadata with `# /// script`)
 - Dependencies declared in script header for use with `uv run`
 - Uses TypedDict for structured type definitions
 - Supports `--dry-run` / `-d` flag
@@ -57,8 +57,11 @@ python server-scripts/backup/python/test_backup_script.py
 - Creates `.bak` backups before changes
 
 ### Python Backup Script
-- Creates encrypted backups: tar -> pigz/gzip -> openssl AES-256-CBC
-- Password read from file (`/root/.backup_password`)
+- Creates encrypted backups via a streaming pipeline: tar -> pigz/gzip -> age (no temp tar on disk)
+- Encryption uses an age identity file (`/root/.backup_age_key.txt`); openssl is only needed to restore legacy `.enc` backups
+- Configured via TOML file (`/etc/backup-script.toml`, override with `--config`); secrets via `BACKUP_UPTIME_KUMA_PASSWORD` / `BACKUP_DISCORD_WEBHOOK_URL` env vars; `--print-default-config` emits a commented example
+- CLI: `--dry-run` (root-free preflight preview), `--verbose`, `--no-docker`, `--no-upload`, `--backup-only`, and a `restore` subcommand (`restore <file> --list` / `--output-dir DIR`)
+- Requires GNU tar (resolved as `gtar` on macOS/brew); writes a `.sha256` manifest next to each backup
 - Integrates with: Discord webhooks, PrivateBin, Uptime Kuma maintenance windows
 - Manages Docker services via compose files (priority restart for Plex)
 - Uses rclone for off-site sync with JSON log parsing
