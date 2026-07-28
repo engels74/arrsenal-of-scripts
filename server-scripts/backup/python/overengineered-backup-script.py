@@ -2877,6 +2877,11 @@ def _finalize_run(success: bool, log_file: Path | None) -> None:
                 if manage_docker_services(other_compose, "start"):
                     backup_state.other_services_started = True
 
+            if not backup_state.plex_started and plex_compose:
+                log.warning("Plex still not started. Retrying after other services...")
+                if manage_docker_services(plex_compose, "start"):
+                    backup_state.plex_started = True
+
             # Verify services are running
             time.sleep(5)
             running = get_running_container_ids()

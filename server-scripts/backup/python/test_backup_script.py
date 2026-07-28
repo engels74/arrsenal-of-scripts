@@ -157,6 +157,49 @@ class TestDockerQueryFailure(ScriptTestCase):
         self.assertIsNone(mod.get_running_container_ids())
 
 
+class TestContainerFinalization(ScriptTestCase):
+    def test_retries_priority_stack_after_other_services_start(self):
+        plex_compose = self.tmp / "plex.yaml"
+        other_compose = self.tmp / "caddy.yaml"
+        calls: list[tuple[list[Path], str]] = []
+        dependencies_started = False
+
+        def manage(compose_files: list[Path], action: str) -> bool:
+            nonlocal dependencies_started
+            calls.append((compose_files, action))
+            if compose_files == [other_compose]:
+                dependencies_started = True
+                return True
+            return dependencies_started
+
+        replacements = {
+            "get_docker_compose_files": lambda: ([plex_compose], [other_compose]),
+            "manage_docker_services": manage,
+            "get_running_container_ids": lambda: ["container-id"],
+            "send_final_status_notification": lambda *_args: None,
+        }
+        originals = {name: getattr(mod, name) for name in replacements}
+        for name, replacement in replacements.items():
+            setattr(mod, name, replacement)
+            self.addCleanup(setattr, mod, name, originals[name])
+        original_sleep = mod.time.sleep
+        mod.time.sleep = lambda _seconds: None
+        self.addCleanup(setattr, mod.time, "sleep", original_sleep)
+
+        mod._finalize_run(True, None)
+
+        self.assertEqual(
+            calls,
+            [
+                ([plex_compose], "start"),
+                ([other_compose], "start"),
+                ([plex_compose], "start"),
+            ],
+        )
+        self.assertTrue(mod.backup_state.plex_started)
+        self.assertTrue(mod.backup_state.other_services_started)
+
+
 class TestPreFlightDryRun(ScriptTestCase):
     def test_invalid_compression_tool_is_aggregated_not_raised(self):
         mod.dry_run_mode = True
