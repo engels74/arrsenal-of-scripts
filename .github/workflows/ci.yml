@@ -25,7 +25,7 @@ jobs:
           version="$(cat .python-version)"
           test -n "$version"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "${{ steps.python.outputs.version }}" }
       # zsh for the zsh-syntax hook (shellcheck and GNU tar ship with the image).
       # The runner's unrelated Google Chrome apt source can fail checksum validation during apt update.
@@ -60,7 +60,7 @@ jobs:
           version="$(cat .python-version)"
           test -n "$version"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with: { python-version: "${{ steps.python.outputs.version }}" }
       - run: uv run --no-project python miscellaneous/claude/claude-diag.py --self-test
   ci-ok:
